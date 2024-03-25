@@ -30,7 +30,8 @@ srcDirs := $(shell find . -name '*.$(srcExt)' -exec dirname {} \; | uniq)
 objects := $(patsubst %.$(srcExt),$(objDir)/%.o,$(sources))
 
 ifeq ($(srcExt),cc)
-	CC = $(CXX) #-static-libstdc++
+	#CC = $(CXX) #-static-libstdc++
+	CC = g++
 else
 	CFlags += -std=gnu99
 endif

@@ -482,21 +482,30 @@ class PatternHistoryTable : LRUSetAssociativeCache<PatternHistoryTableData> {
         uint64_t index = key % this->num_sets;
         uint64_t tag = key / this->num_sets;
         auto &set = this->entries[index];
+        // PC + Address mask
         uint64_t min_tag_mask = (1 << (this->pc_width + this->min_addr_width - this->index_len)) - 1;
+        // PC + Offset mask
         uint64_t max_tag_mask = (1 << (this->pc_width + this->max_addr_width - this->index_len)) - 1;
+        // Keeping track of the footprints for voting
         vector<vector<bool>> min_matches;
         vector<bool> pattern;
+        // Checking all the associative tables
         for (int i = 0; i < this->num_ways; i += 1) {
+            // Ignore invalid sets
             if (!set[i].valid)
                 continue;
+            // Matching the tag for the short event (PC + Offset)
             bool min_match = ((set[i].tag & min_tag_mask) == (tag & min_tag_mask));
+            // Matching for the long event (PC + Address)
             bool max_match = ((set[i].tag & max_tag_mask) == (tag & max_tag_mask));
             vector<bool> &cur_pattern = set[i].data.pattern;
+            // Check for match in long event first
             if (max_match) {
                 this->set_mru(set[i].key);
                 pattern = cur_pattern;
                 break;
             }
+            // If no matches in long event check for short event match
             if (min_match) {
                 min_matches.push_back(cur_pattern);
             }
@@ -556,6 +565,7 @@ class PatternHistoryTable : LRUSetAssociativeCache<PatternHistoryTableData> {
 
 class Bingo {
   public:
+    // Pattern length is the number of cache lines in a region
     Bingo(int pattern_len, int min_addr_width, int max_addr_width, int pc_width, int pattern_history_table_size,
         int filter_table_size, int accumulation_table_size)
         : pattern_len(pattern_len), filter_table(filter_table_size),
@@ -571,9 +581,13 @@ class Bingo {
         }
         uint64_t region_number = block_number / this->pattern_len;
         int region_offset = block_number % this->pattern_len;
+        // Footprinting the access in the accumulation table
         bool success = this->accumulation_table.set_pattern(region_number, region_offset);
+        // If accumulation table contains region update value in footprint don't prefetch
         if (success)
             return vector<uint64_t>();
+
+        // 
         FilterTable::Entry *entry = this->filter_table.find(region_number);
         if (!entry) {
             /* trigger access */
@@ -730,8 +744,11 @@ void CACHE::llc_prefetcher_operate_(uint32_t cpu, uint64_t addr, uint64_t ip, ui
     }
 
     /* call prefetcher and send prefetches */
+    uint64_t block_number = addr >> LOG2_BLOCK_SIZE; // Bingo prefetches at the cache block level, aka 64 bytes
+    // IP is the current PC
     vector<uint64_t> to_prefetch = prefetchers[cpu].access(block_number, ip);
     for (auto &pf_block_number : to_prefetch) {
+        // Generating prefetches for the specified blocks from the prefetcher
         uint64_t pf_address = pf_block_number << LOG2_BLOCK_SIZE;
         prefetch_line(cpu, ip, addr, pf_address, FILL_LLC);
     }
@@ -790,6 +807,4 @@ void CACHE::llc_prefetcher_final_stats_(uint32_t cpu) {
     cout << "* CPU " << cpu << " Total PC+Address Covered Misses: " << prefetchers[cpu].get_cover_cnt(PC_ADDRESS) << endl;
     cout << "* CPU " << cpu << " Total PC+Offset Covered Misses: "  << prefetchers[cpu].get_cover_cnt(PC_OFFSET)  << endl;
     
-    cout << "* CPU " << cpu << " Total PC+Address Overpredictions: " << prefetchers[cpu].get_overpredict_cnt(PC_ADDRESS) << endl;
-    cout << "* CPU " << cpu << " Total PC+Offset Overpredictions: "  << prefetchers[cpu].get_overpredict_cnt(PC_OFFSET)  << endl;
-}
+void CACHE::llc_prefetcher_final_stats_(uint32_t cpu) {}

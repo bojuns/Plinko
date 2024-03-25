@@ -1,0 +1,18 @@
+
+*** ChampSim Multicore Out-of-Order Simulator ***
+
+Warmup Instructions: 1000000
+Simulation Instructions: 10000000
+Number of CPUs: 1
+LLC sets: 2048
+LLC ways: 16
+Off-chip DRAM Size: 4096 MB Channels: 1 Width: 256-bit Data Rate: 1600 MT/s
+
+Assertion failed: (0), function main, file main.cc, line 599.
+CPU 0 runs traces/lbm_1004B.trace.gz
+CPU 1 runs traces/omnetpp_340B.trace.gz
+
+*** Too many traces for the configured number of cores ***
+
+gunzip: can't stat: traces/lbm_1004B.trace.gz (traces/lbm_1004B.trace.gz.gz): No such file or directory
+gunzip: can't stat: traces/omnetpp_340B.trace.gz (traces/omnetpp_340B.trace.gz.gz): No such file or directory
