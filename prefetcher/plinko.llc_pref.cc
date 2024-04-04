@@ -391,7 +391,8 @@ class AccumulationTableData {
   public:
     uint64_t pc;
     int offset;
-    vector<bool> pattern;
+    uint8_t max_accum;
+    vector<uint8_t> pattern;
 };
 
 class AccumulationTable : public LRUFullyAssociativeCache<AccumulationTableData> {
@@ -410,23 +411,28 @@ class AccumulationTable : public LRUFullyAssociativeCache<AccumulationTableData>
         Entry *entry = Super::find(region_number);
         if (!entry)
             return false;
-        entry->data.pattern[offset] = true;
+        uint8_t new_val = entry->data.pattern[offset] + 1;
+        if (new_val > entry->data.max_accum) {
+            entry->data.max_accum = new_val;
+        }
+        entry->data.pattern[offset] = new_val;
         this->set_mru(region_number);
         return true;
     }
 
     Entry insert(FilterTable::Entry &entry) {
         assert(!this->find(entry.key));
-        vector<bool> pattern(this->pattern_len, false);
-        pattern[entry.data.offset] = true;
-        Entry old_entry = Super::insert(entry.key, {entry.data.pc, entry.data.offset, pattern});
+        vector<uint8_t> pattern(this->pattern_len, 0);
+        pattern[entry.data.offset] = 1;
+        Entry old_entry = Super::insert(entry.key, {entry.data.pc, entry.data.offset, 1, pattern});
         this->set_mru(entry.key);
         return old_entry;
     }
-
   private:
     int pattern_len;
 };
+
+enum Event { PC_ADDRESS = 0, PC_OFFSET = 1 };
 
 template <class T> vector<T> my_rotate(const vector<T> &x, int n) {
     vector<T> y;
@@ -437,7 +443,7 @@ template <class T> vector<T> my_rotate(const vector<T> &x, int n) {
     return y;
 }
 
-#define THRESH 0.40
+#define THRESH 0.20
 
 class PatternHistoryTableData {
   public:
@@ -467,7 +473,6 @@ class PatternHistoryTable : LRUSetAssociativeCache<PatternHistoryTableData> {
         int offset = address % this->pattern_len;
         pattern = my_rotate(pattern, -offset);
         uint64_t key = this->build_key(pc, address);
-        /* [TODO] in case of 2-bit counters, try updating all min-matches */
         Super::insert(key, {pattern});
         this->set_mru(key);
     }
@@ -481,32 +486,47 @@ class PatternHistoryTable : LRUSetAssociativeCache<PatternHistoryTableData> {
         uint64_t index = key % this->num_sets;
         uint64_t tag = key / this->num_sets;
         auto &set = this->entries[index];
+        // PC + Address mask
         uint64_t min_tag_mask = (1 << (this->pc_width + this->min_addr_width - this->index_len)) - 1;
+        // PC + Offset mask
         uint64_t max_tag_mask = (1 << (this->pc_width + this->max_addr_width - this->index_len)) - 1;
+        // Keeping track of the footprints for voting
         vector<vector<bool>> min_matches;
         vector<bool> pattern;
+        // Checking all the associative tables
         for (int i = 0; i < this->num_ways; i += 1) {
+            // Ignore invalid sets
             if (!set[i].valid)
                 continue;
+            // Matching the tag for the short event (PC + Offset)
             bool min_match = ((set[i].tag & min_tag_mask) == (tag & min_tag_mask));
+            // Matching for the long event (PC + Address)
             bool max_match = ((set[i].tag & max_tag_mask) == (tag & max_tag_mask));
             vector<bool> &cur_pattern = set[i].data.pattern;
+            // Check for match in long event first
             if (max_match) {
                 this->set_mru(set[i].key);
                 pattern = cur_pattern;
                 break;
             }
+            // If no matches in long event check for short event match
             if (min_match) {
                 min_matches.push_back(cur_pattern);
             }
         }
+        this->last_event = PC_ADDRESS;
         if (pattern.empty()) {
             /* no max match was found, time for a vote! */
             pattern = this->vote(min_matches);
+            this->last_event = PC_OFFSET;
         }
         int offset = address % this->pattern_len;
         pattern = my_rotate(pattern, +offset);
         return pattern;
+    }
+
+    Event get_last_event() {
+        return this->last_event;
     }
 
   private:
@@ -544,10 +564,12 @@ class PatternHistoryTable : LRUSetAssociativeCache<PatternHistoryTableData> {
 
     int pattern_len, index_len;
     int min_addr_width, max_addr_width, pc_width;
+    Event last_event;
 };
 
 class Bingo {
   public:
+    // Pattern length is the number of cache lines in a region
     Bingo(int pattern_len, int min_addr_width, int max_addr_width, int pc_width, int pattern_history_table_size,
         int filter_table_size, int accumulation_table_size)
         : pattern_len(pattern_len), filter_table(filter_table_size),
@@ -563,12 +585,17 @@ class Bingo {
         }
         uint64_t region_number = block_number / this->pattern_len;
         int region_offset = block_number % this->pattern_len;
+        // While regions exist in accumulation table, update history and don't prefetch
+        // This is effectively "training" the prefetcher
         bool success = this->accumulation_table.set_pattern(region_number, region_offset);
-        if (success)
+        if (success) {
+            accum_no_prefs++;
             return vector<uint64_t>();
+        }
         FilterTable::Entry *entry = this->filter_table.find(region_number);
+        // If miss in the filter table, create new filter table entry
         if (!entry) {
-            /* trigger access */
+            // Trigger access is the act of missing in the filter table
             this->filter_table.insert(region_number, pc, region_offset);
             vector<bool> pattern = this->find_in_phts(pc, block_number);
             if (pattern.empty())
@@ -579,11 +606,15 @@ class Bingo {
                     to_prefetch.push_back(region_number * this->pattern_len + i);
             return to_prefetch;
         }
+        // If hit in filter table, transfer data to accumulation table
         if (entry->data.offset != region_offset) {
-            /* move from filter table to accumulation table */
+            // Get evicted entry from the accumulation table if exists
             AccumulationTable::Entry victim = this->accumulation_table.insert(*entry);
+            // Add entry to the accumulation table
             this->accumulation_table.set_pattern(region_number, region_offset);
+            // Remove entry in the filter table
             this->filter_table.erase(region_number);
+            // Check if evicted entry is valid, and if so, move to PHT
             if (victim.valid) {
                 /* move from accumulation table to pattern history table */
                 this->insert_in_phts(victim);
@@ -608,12 +639,57 @@ class Bingo {
 
     void set_debug_level(int debug_level) { this->debug_level = debug_level; }
 
+    /* stats */
+    void add_prefetch(uint64_t block_number) {
+        uint64_t region_number = block_number / this->pattern_len;
+        Event ev = this->events[region_number];
+        this->prefetch_cnt[ev] += 1;
+    }
+
+    void add_cover(uint64_t block_number) {
+        uint64_t region_number = block_number / this->pattern_len;
+        Event ev = this->events[region_number];
+        this->cover_cnt[ev] += 1;
+    }
+
+    void add_overpredict(uint64_t block_number) {
+        uint64_t region_number = block_number / this->pattern_len;
+        Event ev = this->events[region_number];
+        this->overpredict_cnt[ev] += 1;
+    }
+
+    void reset_stats() {
+        for (int i = 0; i < 2; i += 1) {
+            this->prefetch_cnt[i] = 0;
+            this->cover_cnt[i] = 0;
+            this->overpredict_cnt[i] = 0;
+        }
+    }
+
+    uint64_t get_prefetch_cnt(Event ev) {
+        return this->prefetch_cnt[ev];
+    }
+
+    uint64_t get_cover_cnt(Event ev) {
+        return this->cover_cnt[ev];
+    }
+
+    uint64_t get_overpredict_cnt(Event ev) {
+        return this->overpredict_cnt[ev];
+    }
+    uint64_t get_accum_no_prefs() {
+        return this->accum_no_prefs;
+    }
+
   private:
     vector<bool> find_in_phts(uint64_t pc, uint64_t address) {
         if (this->debug_level >= 1) {
             cerr << "[Bingo] find_in_phts(pc=" << pc << ", address=" << address << ")" << endl;
         }
-        return this->pht.find(pc, address);
+        vector<bool> pattern = this->pht.find(pc, address);
+        uint64_t region_number = address / this->pattern_len;
+        events[region_number] = this->pht.get_last_event();
+        return pattern;
     }
 
     void insert_in_phts(const AccumulationTable::Entry &entry) {
@@ -622,7 +698,11 @@ class Bingo {
         }
         uint64_t pc = entry.data.pc;
         uint64_t address = entry.key * this->pattern_len + entry.data.offset;
-        const vector<bool> &pattern = entry.data.pattern;
+        vector<bool> pattern;
+        for (uint8_t element : entry.data.pattern) {
+            bool exceedsThreshold = element > (entry.data.max_accum > 0 ? 1 : 0);
+            pattern.push_back(exceedsThreshold);
+        }
         this->pht.insert(pc, address, pattern);
     }
 
@@ -631,6 +711,14 @@ class Bingo {
     AccumulationTable accumulation_table;
     PatternHistoryTable pht;
     int debug_level = 0;
+
+    /* stats */
+
+    unordered_map<uint64_t, Event> events;
+    uint64_t accum_no_prefs = 0;
+    uint64_t prefetch_cnt[2] = {0};
+    uint64_t cover_cnt[2] = {0};
+    uint64_t overpredict_cnt[2] = {0};
 };
 
 /* Bingo settings */
@@ -644,6 +732,14 @@ const int AT_SIZE = 128;
 
 vector<Bingo> prefetchers;
 
+/* stats */
+unordered_set<uint64_t> prefetched_blocks[NUM_CPUS];
+
+uint64_t roi_prefetch_cnt[NUM_CPUS][2] = {0};
+uint64_t roi_cover_cnt[NUM_CPUS][2] = {0};
+uint64_t roi_overpredict_cnt[NUM_CPUS][2] = {0};
+uint64_t roi_accum_no_prefs[NUM_CPUS] = {0};
+
 void CACHE::llc_prefetcher_initialize_(uint32_t cpu) {
     if (cpu != 0)
         return;
@@ -655,25 +751,77 @@ void CACHE::llc_prefetcher_initialize_(uint32_t cpu) {
 }
 
 void CACHE::llc_prefetcher_operate_(uint32_t cpu, uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type) {
-    /* call prefetcher and send prefetches */
     uint64_t block_number = addr >> LOG2_BLOCK_SIZE;
+    
+    for (int i = 0; i < NUM_CPUS; i += 1) {
+        int cnt = prefetched_blocks[i].erase(block_number);
+        if (cnt == 1)
+            prefetchers[i].add_cover(block_number);
+    }
+    // IP is the current PC
     vector<uint64_t> to_prefetch = prefetchers[cpu].access(block_number, ip);
     for (auto &pf_block_number : to_prefetch) {
+        // Generating prefetches for the specified blocks from the prefetcher
         uint64_t pf_address = pf_block_number << LOG2_BLOCK_SIZE;
         prefetch_line(cpu, ip, addr, pf_address, FILL_LLC);
     }
 }
 
 void CACHE::llc_prefetcher_cache_fill_(uint32_t cpu, uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch,uint64_t evicted_addr) {
+    uint64_t block_number = addr >> LOG2_BLOCK_SIZE;
+    uint64_t evicted_block = evicted_addr >> LOG2_BLOCK_SIZE;
+    
+    if (prefetch == 1) {
+        prefetched_blocks[cpu].insert(block_number);
+        prefetchers[cpu].add_prefetch(block_number);
+    }
+
+    for (int i = 0; i < NUM_CPUS; i += 1) {
+        int cnt = prefetched_blocks[i].erase(evicted_block);
+        if (cnt == 1)
+            prefetchers[i].add_overpredict(evicted_block);
+    }
+
     /* inform all bingo modules of the eviction */
     for (int i = 0; i < NUM_CPUS; i += 1)
-        prefetchers[i].eviction(evicted_addr >> LOG2_BLOCK_SIZE);
+        prefetchers[i].eviction(evicted_block);
 }
 
-void CACHE::llc_prefetcher_inform_warmup_complete_() {}
+void CACHE::llc_prefetcher_inform_warmup_complete_() {
+    for (int i = 0; i < NUM_CPUS; i += 1) {
+        prefetchers[i].reset_stats();
+        prefetched_blocks[i].clear();
+    }
+}
 
-void CACHE::llc_prefetcher_inform_roi_complete_(uint32_t cpu) {}
+void CACHE::llc_prefetcher_inform_roi_complete_(uint32_t cpu) {
+    for (int i = 0; i < 2; i += 1) {
+        roi_prefetch_cnt[cpu][i] = prefetchers[cpu].get_prefetch_cnt(static_cast<Event>(i));
+        roi_cover_cnt[cpu][i] = prefetchers[cpu].get_cover_cnt(static_cast<Event>(i));
+        roi_overpredict_cnt[cpu][i] = prefetchers[cpu].get_overpredict_cnt(static_cast<Event>(i));
+        roi_accum_no_prefs[cpu] = prefetchers[cpu].get_accum_no_prefs();
+    }
+}
 
-void CACHE::llc_prefetcher_roi_stats_(uint32_t cpu) {}
+void CACHE::llc_prefetcher_roi_stats_(uint32_t cpu) {
+    cout << "* CPU " << cpu << " ROI PC+Address Prefetches: " << roi_prefetch_cnt[cpu][PC_ADDRESS] << endl;
+    cout << "* CPU " << cpu << " ROI PC+Offset Prefetches: "  << roi_prefetch_cnt[cpu][PC_OFFSET]  << endl;
 
-void CACHE::llc_prefetcher_final_stats_(uint32_t cpu) {}
+    cout << "* CPU " << cpu << " ROI PC+Address Covered Misses: " << roi_cover_cnt[cpu][PC_ADDRESS] << endl;
+    cout << "* CPU " << cpu << " ROI PC+Offset Covered Misses: "  << roi_cover_cnt[cpu][PC_OFFSET]  << endl;
+    
+    cout << "* CPU " << cpu << " ROI PC+Address Overpredictions: " << roi_overpredict_cnt[cpu][PC_ADDRESS] << endl;
+    cout << "* CPU " << cpu << " ROI PC+Offset Overpredictions: "  << roi_overpredict_cnt[cpu][PC_OFFSET]  << endl;
+ 
+    cout << "* CPU " << cpu << " ROI Accum Table No Prefetches: "  << roi_accum_no_prefs[cpu] << endl;
+}
+
+void CACHE::llc_prefetcher_final_stats_(uint32_t cpu) {
+    cout << "* CPU " << cpu << " Total PC+Address Prefetches: " << prefetchers[cpu].get_prefetch_cnt(PC_ADDRESS) << endl;
+    cout << "* CPU " << cpu << " Total PC+Offset Prefetches: "  << prefetchers[cpu].get_prefetch_cnt(PC_OFFSET)  << endl;
+
+    cout << "* CPU " << cpu << " Total PC+Address Covered Misses: " << prefetchers[cpu].get_cover_cnt(PC_ADDRESS) << endl;
+    cout << "* CPU " << cpu << " Total PC+Offset Covered Misses: "  << prefetchers[cpu].get_cover_cnt(PC_OFFSET)  << endl;
+    
+    cout << "* CPU " << cpu << " ROI Accum Table No Prefetches: "  << prefetchers[cpu].get_accum_no_prefs() << endl;
+}
