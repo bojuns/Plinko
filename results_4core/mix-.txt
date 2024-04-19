@@ -1,1 +1,0 @@
-./run_4core.sh: line 13: ./bin/: is a directory

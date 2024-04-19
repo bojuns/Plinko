@@ -391,8 +391,8 @@ class AccumulationTableData {
   public:
     uint64_t pc;
     int offset;
-    uint8_t max_accum;
-    vector<uint8_t> pattern;
+    vector<bool> pattern;
+    bool coalesced;
 };
 
 class AccumulationTable : public LRUFullyAssociativeCache<AccumulationTableData> {
@@ -407,29 +407,77 @@ class AccumulationTable : public LRUFullyAssociativeCache<AccumulationTableData>
     /**
      * @return A return value of false means that the tag wasn't found in the table and true means success.
      */
-    bool set_pattern(uint64_t region_number, int offset) {
+    bool set_pattern(uint64_t region_number, int offset, bool value) {
+        static int counter = 0;
+        static uint64_t adjacentEntries = 0;
+        static uint64_t totalEntries = 0;
+        static uint64_t evenEntries = 0;
         Entry *entry = Super::find(region_number);
-        if (!entry)
-            return false;
-        uint8_t new_val = entry->data.pattern[offset] + 1;
-        if (new_val > entry->data.max_accum) {
-            entry->data.max_accum = new_val;
+        // Entry found in accumulation table, update entry at offset
+        if (entry) {
+            entry->data.pattern[offset] = value;
+            this->set_mru(region_number);
+            return true;
         }
-        entry->data.pattern[offset] = new_val;
-        this->set_mru(region_number);
-        return true;
+        return false;
+        // // Checking if region can be coalesced
+        // if (region_number % 2 == 0) {
+        //     // Even region number, check up
+        //     entry = Super::find(region_number + 1);
+        // } else {
+        //     // Odd region number, check down
+        //     entry = Super::find(region_number - 1);
+        // }
+        // // No coalescable regions found
+        // if (!entry) return false;
+        // // See if region already coalesced
+        // if (entry->data.coalesced) {
+        // } else {
+        //     entry->data.coalesced = true;
+        //     counter++;
+        //     for (int i = 0; i < this->pattern_len; i++) {
+        //         if (entry->data.pattern[i]) {
+        //             if (i % 2 == 0) {
+        //                 evenEntries++;
+        //                 if (entry->data.pattern[i] && entry->data.pattern[i+1])
+        //                     adjacentEntries++;
+        //             }
+        //             totalEntries++;
+        //         }
+        //     }
+        //     if (counter % 1000 == 0)
+        //         printf("Coalesced regions: %d, Adjacency: %d/%d (%f), Even: %d\n", counter, adjacentEntries, totalEntries, (float) (adjacentEntries) / totalEntries, evenEntries);
+        // }
+        // return false;
     }
 
     Entry insert(FilterTable::Entry &entry) {
         assert(!this->find(entry.key));
-        vector<uint8_t> pattern(this->pattern_len, 0);
-        pattern[entry.data.offset] = 1;
-        Entry old_entry = Super::insert(entry.key, {entry.data.pc, entry.data.offset, 1, pattern});
+        vector<bool> pattern(this->pattern_len, false);
+        pattern[entry.data.offset] = true;
+        Entry old_entry = Super::insert(entry.key, {entry.data.pc, entry.data.offset, pattern, false});
         this->set_mru(entry.key);
         return old_entry;
     }
   private:
     int pattern_len;
+};
+
+class PrefetchQualityTableData {
+    public:
+        bool isUseful;
+};
+
+class PrefetchQualityTable : public LRUFullyAssociativeCache<PrefetchQualityTableData> {
+    typedef LRUFullyAssociativeCache<PrefetchQualityTableData> Super;
+    public:
+    PrefetchQualityTable(int size) : Super(size) {
+        assert(__builtin_popcount(size) == 1);
+    } 
+    Entry insert(int region_number, bool useful) {
+        Entry old_entry = Super::insert(region_number, {useful});
+        return old_entry;
+    }  
 };
 
 enum Event { PC_ADDRESS = 0, PC_OFFSET = 1 };
@@ -446,8 +494,8 @@ template <class T> vector<T> my_rotate(const vector<T> &x, int n) {
 #define THRESH 0.20
 
 class PatternHistoryTableData {
-  public:
-    vector<bool> pattern;
+    public:
+        vector<bool> pattern;
 };
 
 class PatternHistoryTable : LRUSetAssociativeCache<PatternHistoryTableData> {
@@ -580,6 +628,7 @@ class Bingo {
      * @return A vector of block numbers that should be prefetched.
      */
     vector<uint64_t> access(uint64_t block_number, uint64_t pc) {
+        static int prevented = 0;
         if (this->debug_level >= 1) {
             cerr << "[Bingo] access(block_number=" << block_number << ", pc=" << pc << ")" << endl;
         }
@@ -587,7 +636,7 @@ class Bingo {
         int region_offset = block_number % this->pattern_len;
         // While regions exist in accumulation table, update history and don't prefetch
         // This is effectively "training" the prefetcher
-        bool success = this->accumulation_table.set_pattern(region_number, region_offset);
+        bool success = this->accumulation_table.set_pattern(region_number, region_offset, true);
         if (success) {
             accum_no_prefs++;
             return vector<uint64_t>();
@@ -597,13 +646,18 @@ class Bingo {
         if (!entry) {
             // Trigger access is the act of missing in the filter table
             this->filter_table.insert(region_number, pc, region_offset);
+            // If not in filter or accumulation table, check PHT for triggering access
             vector<bool> pattern = this->find_in_phts(pc, block_number);
             if (pattern.empty())
                 return vector<uint64_t>();
             vector<uint64_t> to_prefetch;
             for (int i = 0; i < this->pattern_len; i += 1)
-                if (pattern[i])
-                    to_prefetch.push_back(region_number * this->pattern_len + i);
+                if (pattern[i]) {
+                    uint64_t prefetch_block = region_number * this->pattern_len + i;
+                    // If the prefetch target is not in the overpredictions vector prefetch it
+                    if (find(this->overpredictions.begin(), this->overpredictions.end(), prefetch_block) == this->overpredictions.end())
+                        to_prefetch.push_back(prefetch_block);
+                }
             return to_prefetch;
         }
         // If hit in filter table, transfer data to accumulation table
@@ -611,7 +665,7 @@ class Bingo {
             // Get evicted entry from the accumulation table if exists
             AccumulationTable::Entry victim = this->accumulation_table.insert(*entry);
             // Add entry to the accumulation table
-            this->accumulation_table.set_pattern(region_number, region_offset);
+            this->accumulation_table.set_pattern(region_number, region_offset, true);
             // Remove entry in the filter table
             this->filter_table.erase(region_number);
             // Check if evicted entry is valid, and if so, move to PHT
@@ -655,6 +709,15 @@ class Bingo {
     void add_overpredict(uint64_t block_number) {
         uint64_t region_number = block_number / this->pattern_len;
         Event ev = this->events[region_number];
+        int region_offset = block_number % this->pattern_len;
+        // Add overprediction to fully associative cache
+        vector<uint64_t>::iterator first = find(this->overpredictions.begin(), this->overpredictions.end(), block_number);
+        if (first != this->overpredictions.end()) {
+            this->overpredictions.erase(first);
+        } else if (this->overpredictions.size() == 512) {
+            this->overpredictions.erase(this->overpredictions.begin());
+        }
+        this->overpredictions.push_back(block_number);
         this->overpredict_cnt[ev] += 1;
     }
 
@@ -693,17 +756,13 @@ class Bingo {
     }
 
     void insert_in_phts(const AccumulationTable::Entry &entry) {
+        static int counter = 0;
         if (this->debug_level >= 1) {
             cerr << "[Bingo] insert_in_phts(...)" << endl;
         }
         uint64_t pc = entry.data.pc;
         uint64_t address = entry.key * this->pattern_len + entry.data.offset;
-        vector<bool> pattern;
-        for (uint8_t element : entry.data.pattern) {
-            bool exceedsThreshold = element > (entry.data.max_accum > 0 ? 1 : 0);
-            pattern.push_back(exceedsThreshold);
-        }
-        this->pht.insert(pc, address, pattern);
+        this->pht.insert(pc, address, entry.data.pattern);
     }
 
     int pattern_len;
@@ -711,9 +770,9 @@ class Bingo {
     AccumulationTable accumulation_table;
     PatternHistoryTable pht;
     int debug_level = 0;
+    vector<uint64_t> overpredictions;
 
     /* stats */
-
     unordered_map<uint64_t, Event> events;
     uint64_t accum_no_prefs = 0;
     uint64_t prefetch_cnt[2] = {0};
