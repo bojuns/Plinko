@@ -359,30 +359,61 @@ template <class T> class DirectMappedCache : public SetAssociativeCache<T> {
 };
 
 /** End Of Cache Framework **/
-
+static int half_size;
 class FilterTableData {
   public:
+    // Actual data
+    uint64_t region;
     uint64_t pc;
     int offset;
+    
+    // Overload comparison operator to check half size region around entry
+    bool matches(uint64_t other_region, int other_offset) {
+        return labs(
+            ((int64_t) (other_region * half_size * 2 + other_offset)) - 
+            ((int64_t) (region * half_size * 2 + offset))
+        ) <= half_size;
+    }
 };
 
 class FilterTable : public LRUFullyAssociativeCache<FilterTableData> {
     typedef LRUFullyAssociativeCache<FilterTableData> Super;
 
   public:
-    FilterTable(int size) : Super(size) { assert(__builtin_popcount(size) == 1); }
+    FilterTable(int size, int pattern_len) :
+        Super(size)
+    {
+        half_size = pattern_len / 2;
+        assert(__builtin_popcount(size) == 1);
+        assert(__builtin_popcount(pattern_len) == 1);
+    }
 
-    Entry *find(uint64_t region_number) {
+    Entry *find(uint64_t region_number, int offset) {
         Entry *entry = Super::find(region_number);
-        if (!entry)
-            return nullptr;
-        this->set_mru(region_number);
-        return entry;
+        Entry *above = Super::find(region_number + 1);
+        Entry *below = Super::find(region_number - 1);
+        // Found in current region and matches, return current 
+        if (entry && entry->data.matches(region_number, offset)) {
+            this->set_mru(region_number);
+            return entry;
+        }
+        // Found above and matches, return above
+        if (above && above->data.matches(region_number, offset)) {
+            this->set_mru(region_number + 1);
+            return entry;
+        }
+        // Found below and matches, return below
+        if (below && below->data.matches(region_number, offset)) {
+            this->set_mru(region_number - 1);
+            return entry;
+        }
+        return nullptr;
+
     }
 
     void insert(uint64_t region_number, uint64_t pc, int offset) {
-        assert(!this->find(region_number));
-        Super::insert(region_number, {pc, offset});
+        assert(!this->find(region_number, offset));
+        Super::insert(region_number, {region_number, pc, offset});
         this->set_mru(region_number);
     }
 };
@@ -390,9 +421,26 @@ class FilterTable : public LRUFullyAssociativeCache<FilterTableData> {
 class AccumulationTableData {
   public:
     uint64_t pc;
+    uint64_t region;
     int offset;
     vector<bool> pattern;
-    bool coalesced;
+
+    // Overload comparison operator to check half size region around entry
+    bool matches(uint64_t other_region, int other_offset) {
+        return labs((int64_t) (other_region * half_size * 2 + other_offset) - (int64_t) (region * half_size * 2 + offset)) <= half_size;
+    }
+    int get_idx(uint64_t other_region, int other_offset) {
+        // idx is positive if other access is above current center, negative otherwise
+        int idx = other_region + other_offset - (region + offset) + half_size * 2;
+        // Bounds check
+        if (idx < 0) {
+            return 0;
+        }
+        if (idx >= pattern.size()) {
+            return pattern.size() - 1;
+        }
+        return idx;
+    }
 };
 
 class AccumulationTable : public LRUFullyAssociativeCache<AccumulationTableData> {
@@ -408,54 +456,37 @@ class AccumulationTable : public LRUFullyAssociativeCache<AccumulationTableData>
      * @return A return value of false means that the tag wasn't found in the table and true means success.
      */
     bool set_pattern(uint64_t region_number, int offset, bool value) {
-        static int counter = 0;
-        static uint64_t adjacentEntries = 0;
-        static uint64_t totalEntries = 0;
-        static uint64_t evenEntries = 0;
         Entry *entry = Super::find(region_number);
-        // Entry found in accumulation table, update entry at offset
-        if (entry) {
-            entry->data.pattern[offset] = value;
+        Entry *above = Super::find(region_number + 1);
+        Entry *below = Super::find(region_number - 1);
+        // Found in current region and matches, return current 
+        if (entry && entry->data.matches(region_number, offset)) {
+            entry->data.pattern[entry->data.get_idx(region_number, offset)];
             this->set_mru(region_number);
             return true;
         }
+        // Found above and matches, return above
+        if (above && above->data.matches(region_number, offset)) {
+            entry->data.pattern[entry->data.get_idx(region_number + 1, offset)];
+            this->set_mru(region_number + 1);
+            return true;
+        }
+        // Found below and matches, return below
+        if (below && below->data.matches(region_number, offset)) {
+            entry->data.pattern[entry->data.get_idx(region_number - 1, offset)];
+            this->set_mru(region_number - 1);
+            return true;
+        }
         return false;
-        // // Checking if region can be coalesced
-        // if (region_number % 2 == 0) {
-        //     // Even region number, check up
-        //     entry = Super::find(region_number + 1);
-        // } else {
-        //     // Odd region number, check down
-        //     entry = Super::find(region_number - 1);
-        // }
-        // // No coalescable regions found
-        // if (!entry) return false;
-        // // See if region already coalesced
-        // if (entry->data.coalesced) {
-        // } else {
-        //     entry->data.coalesced = true;
-        //     counter++;
-        //     for (int i = 0; i < this->pattern_len; i++) {
-        //         if (entry->data.pattern[i]) {
-        //             if (i % 2 == 0) {
-        //                 evenEntries++;
-        //                 if (entry->data.pattern[i] && entry->data.pattern[i+1])
-        //                     adjacentEntries++;
-        //             }
-        //             totalEntries++;
-        //         }
-        //     }
-        //     if (counter % 1000 == 0)
-        //         printf("Coalesced regions: %d, Adjacency: %d/%d (%f), Even: %d\n", counter, adjacentEntries, totalEntries, (float) (adjacentEntries) / totalEntries, evenEntries);
-        // }
-        // return false;
     }
 
     Entry insert(FilterTable::Entry &entry) {
-        assert(!this->find(entry.key));
-        vector<bool> pattern(this->pattern_len, false);
-        pattern[entry.data.offset] = true;
-        Entry old_entry = Super::insert(entry.key, {entry.data.pc, entry.data.offset, pattern, false});
+        if (this->find(entry.key)) {
+            return *this->find(entry.key);
+        }
+        vector<bool> pattern(this->pattern_len * 3, false);
+        pattern[entry.data.offset + this->pattern_len] = true;
+        Entry old_entry = Super::insert(entry.key, {entry.data.pc, entry.data.region, entry.data.offset, pattern});
         this->set_mru(entry.key);
         return old_entry;
     }
@@ -517,8 +548,8 @@ class PatternHistoryTable : LRUSetAssociativeCache<PatternHistoryTableData> {
 
     /* address is actually block number */
     void insert(uint64_t pc, uint64_t address, vector<bool> pattern) {
-        assert((int)pattern.size() == this->pattern_len);
-        int offset = address % this->pattern_len;
+        assert((int)pattern.size() == this->pattern_len * 3);
+        int offset = address % this->pattern_len * 2;
         pattern = my_rotate(pattern, -offset);
         uint64_t key = this->build_key(pc, address);
         Super::insert(key, {pattern});
@@ -598,7 +629,7 @@ class PatternHistoryTable : LRUSetAssociativeCache<PatternHistoryTableData> {
         int n = x.size();
         vector<bool> ret(this->pattern_len, false);
         for (int i = 0; i < n; i += 1)
-            assert((int)x[i].size() == this->pattern_len);
+            assert((int)x[i].size() == this->pattern_len * 3);
         for (int i = 0; i < this->pattern_len; i += 1) {
             int cnt = 0;
             for (int j = 0; j < n; j += 1)
@@ -620,7 +651,7 @@ class Bingo {
     // Pattern length is the number of cache lines in a region
     Bingo(int pattern_len, int min_addr_width, int max_addr_width, int pc_width, int pattern_history_table_size,
         int filter_table_size, int accumulation_table_size)
-        : pattern_len(pattern_len), filter_table(filter_table_size),
+        : pattern_len(pattern_len), filter_table(filter_table_size, pattern_len),
           accumulation_table(accumulation_table_size, pattern_len),
           pht(pattern_history_table_size, pattern_len, min_addr_width, max_addr_width, pc_width) {}
 
@@ -641,7 +672,7 @@ class Bingo {
             accum_no_prefs++;
             return vector<uint64_t>();
         }
-        FilterTable::Entry *entry = this->filter_table.find(region_number);
+        FilterTable::Entry *entry = this->filter_table.find(region_number, region_offset);
         // If miss in the filter table, create new filter table entry
         if (!entry) {
             // Trigger access is the act of missing in the filter table
@@ -651,9 +682,9 @@ class Bingo {
             if (pattern.empty())
                 return vector<uint64_t>();
             vector<uint64_t> to_prefetch;
-            for (int i = 0; i < this->pattern_len; i += 1)
+            for (int i = 0; i < this->pattern_len * 3; i += 1)
                 if (pattern[i]) {
-                    uint64_t prefetch_block = region_number * this->pattern_len + i;
+                    uint64_t prefetch_block = region_number * this->pattern_len + i - this->pattern_len;
                     // If the prefetch target is not in the overpredictions vector prefetch it
                     if (find(this->overpredictions.begin(), this->overpredictions.end(), prefetch_block) == this->overpredictions.end())
                         to_prefetch.push_back(prefetch_block);
