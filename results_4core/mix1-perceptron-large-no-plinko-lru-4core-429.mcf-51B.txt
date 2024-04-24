@@ -1,1 +1,0 @@
-./bin/perceptron-large-no-plinko-lru-4core -warmup_instructions 10000000 -simulation_instructions 50000000 -traces traces/429.mcf-51B.champsimtrace.xz

@@ -372,7 +372,7 @@ class FilterTableData {
 
     // Overload comparison operator to check half size region around entry
     bool matches(uint64_t other_region, int other_offset, int size) {
-        return get_abs_diff(other_region, other_offset, size) <= size ;
+        return get_abs_diff(other_region, other_offset, size) <= size / 2;
     }
 
     uint64_t get_abs_diff(uint64_t other_region, int other_offset, int size) {
@@ -456,7 +456,7 @@ class AccumulationTableData {
     // Overload comparison operator to check half size region around entry
     bool matches(uint64_t other_region, int other_offset, int size) {
         // return other_region == this->region;
-        return get_abs_diff(other_region, other_offset, size) <= size;
+        return get_abs_diff(other_region, other_offset, size) <= size / 2;
     }
 
     uint64_t get_abs_diff(uint64_t other_region, int other_offset, int size) {
@@ -571,7 +571,7 @@ template <class T> vector<T> my_rotate(const vector<T> &x, int n) {
     return y;
 }
 
-#define THRESH 0.20
+#define THRESH 0.30
 
 class PatternHistoryTableData {
     public:

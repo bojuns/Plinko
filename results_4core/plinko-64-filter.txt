@@ -1,0 +1,84 @@
+*** ChampSim Multicore Out-of-Order Simulator ***
+
+Warmup Instructions: 10000000
+Simulation Instructions: 50000000
+Number of CPUs: 1
+LLC sets: 2048
+LLC ways: 16
+Off-chip DRAM Size: 4096 MB Channels: 1 Width: 256-bit Data Rate: 1600 MT/s
+
+CPU 0 runs traces/429.mcf-51B.champsimtrace.xz
+Heartbeat CPU 0 instructions: 10000000 cycles: 5556127 heartbeat IPC: 1.79981 cumulative IPC: 1.79981 (Simulation time: 0 hr 0 min 17 sec) 
+
+Warmup complete CPU 0 instructions: 10000004 cycles: 5556128 (Simulation time: 0 hr 0 min 17 sec) 
+
+Heartbeat CPU 0 instructions: 20000000 cycles: 67049755 heartbeat IPC: 0.162618 cumulative IPC: 0.162618 (Simulation time: 0 hr 0 min 46 sec) 
+Heartbeat CPU 0 instructions: 30000001 cycles: 139771848 heartbeat IPC: 0.13751 cumulative IPC: 0.149014 (Simulation time: 0 hr 1 min 18 sec) 
+Heartbeat CPU 0 instructions: 40000000 cycles: 200304822 heartbeat IPC: 0.165199 cumulative IPC: 0.154045 (Simulation time: 0 hr 1 min 48 sec) 
+Heartbeat CPU 0 instructions: 50000002 cycles: 278048318 heartbeat IPC: 0.128628 cumulative IPC: 0.146793 (Simulation time: 0 hr 2 min 20 sec) 
+Heartbeat CPU 0 instructions: 60000000 cycles: 341840442 heartbeat IPC: 0.156759 cumulative IPC: 0.148684 (Simulation time: 0 hr 2 min 50 sec) 
+Finished CPU 0 instructions: 50000000 cycles: 336284340 cumulative IPC: 0.148684 (Simulation time: 0 hr 2 min 50 sec) 
+
+CPU 0 Branch Prediction Accuracy: 94.5071% MPKI: 13.1013
+
+ChampSim completed all CPUs
+
+Region of Interest Statistics
+
+CPU 0 cumulative IPC: 0.148684 instructions: 50000000 cycles: 336284340
+L1D TOTAL     ACCESS:   13790308  HIT:    9056956  MISS:    4733352
+L1D LOAD      ACCESS:   11341021  HIT:    6728184  MISS:    4612837
+L1D RFO       ACCESS:    2449287  HIT:    2328772  MISS:     120515
+L1D PREFETCH  ACCESS:          0  HIT:          0  MISS:          0
+L1D WRITEBACK ACCESS:          0  HIT:          0  MISS:          0
+L1D PREFETCH  REQUESTED:          0  ISSUED:          0  USEFUL:          0  USELESS:          0
+L1I TOTAL     ACCESS:   12490537  HIT:   12490537  MISS:          0
+L1I LOAD      ACCESS:   12490537  HIT:   12490537  MISS:          0
+L1I RFO       ACCESS:          0  HIT:          0  MISS:          0
+L1I PREFETCH  ACCESS:          0  HIT:          0  MISS:          0
+L1I WRITEBACK ACCESS:          0  HIT:          0  MISS:          0
+L1I PREFETCH  REQUESTED:          0  ISSUED:          0  USEFUL:          0  USELESS:          0
+LLC TOTAL     ACCESS:   12349635  HIT:    8147934  MISS:    4201701
+LLC LOAD      ACCESS:    4612755  HIT:    2525181  MISS:    2087574
+LLC RFO       ACCESS:     120512  HIT:      60068  MISS:      60444
+LLC PREFETCH  ACCESS:    6585297  HIT:    4531614  MISS:    2053683
+LLC WRITEBACK ACCESS:    1031071  HIT:    1031071  MISS:          0
+LLC PREFETCH  REQUESTED:   12745172  ISSUED:   10253603  USEFUL:     893784  USELESS:    1615438
+Major fault: 0 Minor fault: 36182
+
+DRAM Statistics
+ CHANNEL 0
+ RQ ROW_BUFFER_HIT:          0  ROW_BUFFER_MISS:          0
+ DBUS_CONGESTED:          0
+ WQ ROW_BUFFER_HIT:          0  ROW_BUFFER_MISS:          0  FULL:          0
+
+
+------------------------------------
+
+=== CPU 0 Total Stats ===
+* CPU 0 Total Accesses: 4612755
+* CPU 0 Total Misses: 2087574
+* CPU 0 Total Prefetches: 2053683
+* CPU 0 Total Prefetch Hits: 758261
+* CPU 0 Total Non-useful Prefetches: 1286955
+* CPU 0 Total Undecided Prefetches: 8467
+* CPU 0 Total PC+Address Prefetches: 250149
+* CPU 0 Total PC+Offset Prefetches: 1803534
+* CPU 0 Total PC+Address Covered Misses: 31505
+* CPU 0 Total PC+Offset Covered Misses: 726756
+* CPU 0 ROI Accum Table No Prefetches: 804174
+
+=== CPU 0 ROI Stats ===
+* CPU 0 ROI Accesses: 4612755
+* CPU 0 ROI Misses: 2087574
+* CPU 0 ROI Prefetches: 2053683
+* CPU 0 ROI Prefetch Hits: 758261
+* CPU 0 ROI Non-useful Prefetches: 1286955
+* CPU 0 ROI Undecided Prefetches: 8467
+* CPU 0 ROI PC+Address Prefetches: 250149
+* CPU 0 ROI PC+Offset Prefetches: 1803534
+* CPU 0 ROI PC+Address Covered Misses: 31505
+* CPU 0 ROI PC+Offset Covered Misses: 726756
+* CPU 0 ROI PC+Address Overpredictions: 150480
+* CPU 0 ROI PC+Offset Overpredictions: 1136475
+* CPU 0 ROI Accum Table No Prefetches: 804174
