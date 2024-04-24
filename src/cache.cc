@@ -1113,7 +1113,7 @@ int CACHE::prefetch_line(uint32_t cpu, uint64_t ip, uint64_t base_addr, uint64_t
     pf_requested++;
 
     if (PQ.occupancy < PQ.SIZE) {
-        if ((base_addr>>LOG2_PAGE_SIZE) == (pf_addr>>LOG2_PAGE_SIZE)) {
+        if (labs(((int64_t)(base_addr>>LOG2_PAGE_SIZE)) - ((int64_t)(pf_addr>>LOG2_PAGE_SIZE))) <= 1) {
             
             PACKET pf_packet;
             pf_packet.fill_level = fill_level;
