@@ -3,6 +3,9 @@
 #include <getopt.h>
 #include "ooo_cpu.h"
 #include "uncore.h"
+//PLINKO ADDITION
+#include "config.h"
+//END OF PLINKO ADDITION
 
 uint8_t warmup_complete[NUM_CPUS], 
         simulation_complete[NUM_CPUS], 
@@ -468,6 +471,7 @@ int main(int argc, char** argv)
 
     // check to see if knobs changed using getopt_long()
     int c;
+    int traces_encountered = 0;
     while (1) {
         static struct option long_options[] =
         {
@@ -476,19 +480,21 @@ int main(int argc, char** argv)
             {"hide_heartbeat", no_argument, 0, 'h'},
             {"cloudsuite", no_argument, 0, 'c'},
             {"low_bandwidth",  no_argument, 0, 'b'},
-            {"traces",  no_argument, 0, 't'},
+            {"traces",  required_argument, 0, 't'},
+            {"snapshot_enable", required_argument, 0, 's'},
+            {"output_path_base", required_argument, 0, 'o'},
+            {"max_file_count", required_argument, 0, 'm'},
+            {"snapshot_interval", required_argument, 0, 'v'},
+            {"geometric_base", required_argument, 0, 'g'},
             {0, 0, 0, 0}      
         };
 
         int option_index = 0;
-
-        c = getopt_long_only(argc, argv, "wihsb", long_options, &option_index);
+        c = getopt_long_only(argc, argv, "wihcbtsomvg", long_options, &option_index);
 
         // no more option characters
         if (c == -1)
             break;
-
-        int traces_encountered = 0;
 
         switch(c) {
             case 'w':
@@ -510,17 +516,38 @@ int main(int argc, char** argv)
             case 't':
                 traces_encountered = 1;
                 break;
+            case 's':
+                DO_PHT_SNAPSHOTS = atol(optarg) != 0;
+                break;
+            case 'o':
+                SNAPSHOT_FILE_BASE_NAME = optarg;
+                break;
+            case 'm':
+                MAX_SNAPSHOT_FILES = atol(optarg);
+                break;
+            case 'v':
+                SNAPSHOT_INTERVAL = atol(optarg);
+                break;
+            case 'g':
+                GEOMETRIC_BASE = atof(optarg);
+                break;
             default:
                 abort();
         }
 
-        if (traces_encountered == 1)
-            break;
+        //if (traces_encountered == 1)
+        //    break;
     }
 
     // consequences of knobs
     cout << "Warmup Instructions: " << warmup_instructions << endl;
     cout << "Simulation Instructions: " << simulation_instructions << endl;
+    cout << "Doing snapshots: " << (DO_PHT_SNAPSHOTS ? "yes" : "no") << endl;
+    cout << "Snapshot output file name base: " << SNAPSHOT_FILE_BASE_NAME << endl;
+    cout << "Maximum output file count: " << MAX_SNAPSHOT_FILES << endl;
+    cout << "Snapshot interval: " << SNAPSHOT_INTERVAL << endl;
+    cout << "Snapshot geometric base: " << GEOMETRIC_BASE << endl;
+    
     //cout << "Scramble Loads: " << (knob_scramble_loads ? "ture" : "false") << endl;
     cout << "Number of CPUs: " << NUM_CPUS << endl;
     cout << "LLC sets: " << LLC_SET << endl;
@@ -598,6 +625,8 @@ int main(int argc, char** argv)
                 printf("\n*** Too many traces for the configured number of cores ***\n\n");
                 assert(0);
             }
+
+            break;
         }
         else if(strcmp(argv[i],"-traces") == 0) {
             found_traces = 1;

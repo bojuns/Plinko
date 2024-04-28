@@ -5,6 +5,8 @@
 //*PLINKO ADDITION
 #include <fstream> 
 #include <typeinfo>
+#include <cmath>
+#include "config.h"
 //END OF PLINKO ADDITION*/
 
 using namespace std;
@@ -12,10 +14,7 @@ using namespace std;
 
 //*PLINKO ADDITION
 //BENCHMARK CONFIGURATION CONSTANTS
-#define DO_PHT_SNAPSHOTS 1
-#define SNAPSHOT_INTERVAL 100000
-#define SNAPSHOT_FILE_BASE_NAME "results_4core/PHT_Snapshot_"
-#define MAX_SNAPSHOT_FILES 20
+//see config.h
 
 long long int accessNumber = 0;
 long long int filesWritten = 0;
@@ -612,6 +611,8 @@ class Bingo {
         //*PLINKO ADDITION
         headers.push_back("Key");
         headers.push_back("Footprint");
+        trainingTotal = 0;
+        prefetchTotal = 0;
         //END OF PLINKO ADDITION*/
     }
 
@@ -623,11 +624,19 @@ class Bingo {
         if(DO_PHT_SNAPSHOTS) {
             accessNumber++;
 
-            if(accessNumber >= SNAPSHOT_INTERVAL * (filesWritten + 1) && filesWritten < MAX_SNAPSHOT_FILES) {
+            double multiplier = filesWritten + 1;
+            if(GEOMETRIC_BASE > 1.001) //use geometric series only if base is larger than 1
+                multiplier = pow(GEOMETRIC_BASE, filesWritten);
+
+            if(accessNumber >= SNAPSHOT_INTERVAL * multiplier && filesWritten < MAX_SNAPSHOT_FILES) {
                 ofstream outFile;
+                ofstream outFileTraining;
                 outFile.open(SNAPSHOT_FILE_BASE_NAME + std::to_string(accessNumber), std::ofstream::out);
+                outFileTraining.open(SNAPSHOT_FILE_BASE_NAME + string("TRAIN") + std::to_string(accessNumber), std::ofstream::out);
                 outFile << this->pht.log(headers, SetAssociativeCache<PatternHistoryTableData>::write_entry);
+                outFileTraining << trainingTotal << " " << prefetchTotal << endl;
                 outFile.close();
+                outFileTraining.close();
                 filesWritten++;
             }
         }
@@ -644,7 +653,6 @@ class Bingo {
         if (success)
             return vector<uint64_t>();
 
-        // 
         FilterTable::Entry *entry = this->filter_table.find(region_number);
         if (!entry) {
             /* trigger access */
@@ -653,15 +661,19 @@ class Bingo {
             if (pattern.empty())
                 return vector<uint64_t>();
             vector<uint64_t> to_prefetch;
-            for (int i = 0; i < this->pattern_len; i += 1)
-                if (pattern[i])
+            for(int i = 0; i < this->pattern_len; i += 1) {
+                if(pattern[i]) {
                     to_prefetch.push_back(region_number * this->pattern_len + i);
+                    prefetchTotal++; //PLINKO ADDITION
+                }
+            }
             return to_prefetch;
         }
         if (entry->data.offset != region_offset) {
             /* move from filter table to accumulation table */
             AccumulationTable::Entry victim = this->accumulation_table.insert(*entry);
-            this->accumulation_table.set_pattern(region_number, region_offset);
+            //PLINKO ADDITION: "trainingTotal +="
+            trainingTotal += this->accumulation_table.set_pattern(region_number, region_offset);
             this->filter_table.erase(region_number);
             if (victim.valid) {
                 /* move from accumulation table to pattern history table */
@@ -763,8 +775,9 @@ class Bingo {
     uint64_t overpredict_cnt[2] = {0};
 
     //*PLINKO ADDITION
-    //ofstream outFile;
     vector<string> headers;
+    uint64_t trainingTotal;
+    uint64_t prefetchTotal;
     //END OF PLINKO ADDITION*/
 };
 
