@@ -3,3 +3,4 @@ obj/*
 traces/*
 results_4core/*
 results_new/*
+.*
