@@ -82,7 +82,7 @@ def get_footprint_offset_stats(trace_str, base, repeated_footprints, suffix_tree
             str_offset = len(trace_str) - (len(occ[j][1]) - 1)
 
             # get offset relative to footprint
-            footprint_offset = (str_offset + base) % footprint_len
+            footprint_offset = str_offset % footprint_len
 
             # update respective counter
             offset_counts[footprint_offset] += 1
