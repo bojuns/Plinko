@@ -56,12 +56,12 @@ def parse_pht_file(path):
             big_str += "." * 64 # preserve 64B footprint alignment
         big_str += entries[i-1][1]
 
-    return big_str, entries[0][0]
+    return big_str, entries[0][0], len(lines)-1
 
 
-def get_repeated_footprints(trace_str, base, min_substring_len=8, min_occ=4, footprint_len=64, sort_kernel=sort_by_num_ones):
+def get_repeated_footprints(trace_str, base, min_substring_len=8, min_occ=4, footprint_len=64, sort_kernel=sort_by_num_ones, trim_zeros=True):
     tree = Tree({"A": trace_str}, builder=BUILDERS[2])
-    reps = maximal_repeats(tree, min_substring_len, min_occ)
+    reps = maximal_repeats(tree, min_substring_len, min_occ, trim_zeros=trim_zeros)
     reps.sort(key=sort_by_num_ones, reverse=True) # sort repeated substrings by total number of ones (freq*ones_count)
     return reps, tree
 
@@ -176,6 +176,8 @@ def analyze_footprint_offset_stats(stats, outFileName):
         outFile.write(f"{ones_total[i]}, {ones_not_mode[i]}, \"=B{i+1}/A{i+1}\"\n")
         #print(f'{stats[i]}: {ones_not_mode[i]} / {ones_total[i]} = {ones_not_mode[i] / ones_total[i] * 100}%')
 
+    outFile.close()
+
     
 
 if __name__ == "__main__":
@@ -193,17 +195,35 @@ if __name__ == "__main__":
 
     for i in range(0, tr_count):
         access_num = tr_start + i * tr_stride
-        trace_str, base = parse_pht_file(in_base + str(access_num))
+        trace_str, base, total_footprints = parse_pht_file(in_base + str(access_num))
         reps, tree = get_repeated_footprints(trace_str, base, 6, 4, footprint_len)
+        print("Repeated footprints found.")
 
         stats1 = get_footprint_offset_stats(trace_str, base, reps, tree)
-        write_footprint_offset_stats(stats1, out_base + str(access_num))
+        #write_footprint_offset_stats(stats1, out_base + str(access_num))
+        print("Offset stats calculated.")
 
-        stats2 = remove_duplicates(stats1, 0.95)
-        write_footprint_offset_stats(stats2, out_base + "2_" + str(access_num))
+        stats2 = remove_duplicates(stats1, 0.90)
+        print(f"{len(stats1) - len(stats2)} duplicates removed.")
 
-        analyze_footprint_offset_stats(stats1, "test1.csv")
-        analyze_footprint_offset_stats(stats2, "test2.csv")
+        write_footprint_offset_stats(stats2, out_base + str(access_num))
+        print(f"Wrote stats to file '{out_base + str(access_num)}'.")
 
-      
-    # maximal_repeats(trace_str, footprint_len, 2, False)
+        #analyze_footprint_offset_stats(stats1, "test1.csv")
+        analyze_footprint_offset_stats(stats2, out_base + '_ones-non-mode' + str(access_num))
+        print(f"Wrote ones analysis to file '{out_base + '_ones-non-mode' + str(access_num)}'.")
+
+        # full duplicate footprints
+        reps_full, tree_full = get_repeated_footprints(trace_str, base, footprint_len, 2, footprint_len, trim_zeros=False)
+
+        total_repeats = 0
+
+        for j in range(len(reps_full)):
+            total_repeats += reps_full[j][0]
+
+        full_footprint_str = f"Total ones count: {trace_str.count('1')}, total footprint count: {total_footprints}, of which {total_repeats} are repeats.\n"
+
+        print(full_footprint_str)
+        outFile = open(out_base + "_full-footprints" + str(access_num), "w")
+        outFile.write(full_footprint_str)
+        outFile.close()

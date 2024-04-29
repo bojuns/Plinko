@@ -197,6 +197,10 @@ template <class T> class SetAssociativeCache {
         uint64_t key;
         uint64_t index;
         uint64_t tag;
+        //*PLINKO ADDITION
+        uint64_t trainingCount;
+        uint64_t longEventPrefetches;
+        //END OF PLINKO ADDITION*/
         bool valid;
         T data;
     };
@@ -246,7 +250,7 @@ template <class T> class SetAssociativeCache {
         }
         Entry &victim = set[victim_way];
         Entry old_entry = victim;
-        victim = {key, index, tag, true, data};
+        victim = {key, index, tag, victim.trainingCount, victim.longEventPrefetches, true, data}; //PLINKO MODIFICATION
         auto &cam = cams[index];
         if (old_entry.valid) {
             int num_erased = cam.erase(old_entry.tag);
@@ -288,6 +292,8 @@ template <class T> class SetAssociativeCache {
             footprintStr += std::to_string(entry.data.pattern[i]);
         }
         table.set_cell(row, 1, footprintStr);
+        table.set_cell(row, 2, entry.trainingCount);
+        table.set_cell(row, 3, entry.longEventPrefetches);
     }
     //END OF PLINKO ADDITION*/
 
@@ -447,6 +453,7 @@ class AccumulationTable : public LRUFullyAssociativeCache<AccumulationTableData>
         if (!entry)
             return false;
         entry->data.pattern[offset] = true;
+        entry->trainingCount++; //PLINKO ADDITION
         this->set_mru(region_number);
         return true;
     }
@@ -557,6 +564,44 @@ class PatternHistoryTable : public LRUSetAssociativeCache<PatternHistoryTableDat
         return pattern;
     }
 
+    //*PLINKO ADDITION
+    SetAssociativeCache<PatternHistoryTableData>::Entry *find_entry(uint64_t pc, uint64_t address) {
+        SetAssociativeCache<PatternHistoryTableData>::Entry *entry = nullptr;
+
+        uint64_t key = this->build_key(pc, address);
+        uint64_t index = key % this->num_sets;
+        uint64_t tag = key / this->num_sets;
+        auto &set = this->entries[index];
+
+        // PC + Address mask
+        uint64_t min_tag_mask = (1 << (this->pc_width + this->min_addr_width - this->index_len)) - 1;
+        // PC + Offset mask
+        uint64_t max_tag_mask = (1 << (this->pc_width + this->max_addr_width - this->index_len)) - 1;
+
+        vector<bool> pattern;
+        // Checking all the associative tables
+        for (int i = 0; i < this->num_ways; i += 1) {
+            // Ignore invalid sets
+            if (!set[i].valid)
+                continue;
+            // Matching the tag for the short event (PC + Offset)
+            bool min_match = ((set[i].tag & min_tag_mask) == (tag & min_tag_mask));
+            // Matching for the long event (PC + Address)
+            bool max_match = ((set[i].tag & max_tag_mask) == (tag & max_tag_mask));
+            vector<bool> &cur_pattern = set[i].data.pattern;
+            // Check for match in long event first
+            if (max_match) {
+                //this->set_mru(set[i].key);
+                pattern = cur_pattern;
+                entry = &set[i];
+                break;
+            }
+        }
+        
+        return entry;
+    } 
+    //END OF PLINKO ADDITION*/
+
     Event get_last_event() {
         return this->last_event;
     }
@@ -611,6 +656,8 @@ class Bingo {
         //*PLINKO ADDITION
         headers.push_back("Key");
         headers.push_back("Footprint");
+        headers.push_back("TrainingAccesses");
+        headers.push_back("LongEventPrefetches");
         trainingTotal = 0;
         prefetchTotal = 0;
         //END OF PLINKO ADDITION*/
@@ -630,13 +677,15 @@ class Bingo {
 
             if(accessNumber >= SNAPSHOT_INTERVAL * multiplier && filesWritten < MAX_SNAPSHOT_FILES) {
                 ofstream outFile;
-                ofstream outFileTraining;
                 outFile.open(SNAPSHOT_FILE_BASE_NAME + std::to_string(accessNumber), std::ofstream::out);
-                outFileTraining.open(SNAPSHOT_FILE_BASE_NAME + string("TRAIN") + std::to_string(accessNumber), std::ofstream::out);
                 outFile << this->pht.log(headers, SetAssociativeCache<PatternHistoryTableData>::write_entry);
-                outFileTraining << trainingTotal << " " << prefetchTotal << endl;
                 outFile.close();
+                //*
+                ofstream outFileTraining;
+                outFileTraining.open(SNAPSHOT_FILE_BASE_NAME + string("TRAIN") + std::to_string(accessNumber), std::ofstream::out);
+                outFileTraining << trainingTotal << " " << prefetchTotal << endl;
                 outFileTraining.close();
+                //*/
                 filesWritten++;
             }
         }
@@ -654,17 +703,24 @@ class Bingo {
             return vector<uint64_t>();
 
         FilterTable::Entry *entry = this->filter_table.find(region_number);
+        SetAssociativeCache<PatternHistoryTableData>::Entry *entry2; //PLINKO ADDITION
         if (!entry) {
             /* trigger access */
             this->filter_table.insert(region_number, pc, region_offset);
             vector<bool> pattern = this->find_in_phts(pc, block_number);
             if (pattern.empty())
                 return vector<uint64_t>();
+            entry2 = this->pht.find_entry(pc, block_number); //PLINKO ADDITION
             vector<uint64_t> to_prefetch;
             for(int i = 0; i < this->pattern_len; i += 1) {
                 if(pattern[i]) {
                     to_prefetch.push_back(region_number * this->pattern_len + i);
-                    prefetchTotal++; //PLINKO ADDITION
+                    //*PLINKO ADDITION
+                    if(entry2) {
+                        entry2->longEventPrefetches++;
+                    }
+                    prefetchTotal++; 
+                    //END OF PLINKO ADDITION*/
                 }
             }
             return to_prefetch;
