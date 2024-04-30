@@ -361,25 +361,19 @@ template <class T> class DirectMappedCache : public SetAssociativeCache<T> {
 class FilterTableData {
   public:
     // Actual data
-    uint64_t region;
+    uint64_t region_start;
+    uint64_t region_end;
     uint64_t pc;
-    int offset;
 
     // Constructor
-    FilterTableData(uint64_t region, uint64_t pc, int offset) : region(region), pc(pc), offset(offset) {}
-    // Copy Constructor
-    FilterTableData(const FilterTableData *other) : region(other->region), pc(other->pc), offset(other->offset) {}
+    FilterTableData(uint64_t addr, uint64_t pc, int offset) : 
+        region_start(addr - offset / 2),
+        region_end(addr + offset / 2),
+        pc(pc) {}
 
     // Overload comparison operator to check half size region around entry
-    bool matches(uint64_t other_region, int other_offset, int size) {
-        return get_abs_diff(other_region, other_offset, size) <= size / 2;
-    }
-
-    uint64_t get_abs_diff(uint64_t other_region, int other_offset, int size) {
-        uint64_t other_addr = other_region * size + other_offset;
-        uint64_t my_addr = this->region * size + this->offset;
-        uint64_t abs_diff = other_addr > my_addr ? (other_addr - my_addr) : (my_addr - other_addr);
-        return abs_diff;
+    bool matches(uint64_t other_addr) {
+        return this->region_start <= other_addr && other_addr < this->region_end;
     }
 };
 
@@ -393,12 +387,12 @@ class FilterTable {
         assert(__builtin_popcount(pattern_len) == 1);
     }
 
-    vector<shared_ptr<FilterTableData>> find(uint64_t region_number, int offset) {
+    vector<shared_ptr<FilterTableData>> find(uint64_t addr) {
         vector<shared_ptr<FilterTableData>> found;
         // Search for matching values
         auto iter = table.begin();
         while(iter != table.end()) {
-            if((*iter)->matches(region_number, offset, this->pattern_len)) {
+            if((*iter)->matches(addr)) {
                 found.push_back(*iter);
                 iter = table.erase(iter);
             } else {
@@ -410,15 +404,15 @@ class FilterTable {
             return found;
         // Found a matches, make LRU
         for (auto match : found) {
-            assert(match->matches(region_number, offset, this->pattern_len));
+            // assert(match->matches(addr));
             table.insert(table.begin(), match);
         }
         return found;
     }
 
-    void insert(uint64_t region_number, uint64_t pc, int offset) {
-        assert(this->find(region_number, offset).size() == 0);
-        shared_ptr<FilterTableData> new_ptr(new FilterTableData(region_number, pc, offset));
+    void insert(uint64_t addr, uint64_t pc) {
+        assert(this->find(addr).size() == 0);
+        shared_ptr<FilterTableData> new_ptr(new FilterTableData(addr, pc, this->pattern_len));
         table.insert(table.begin(), new_ptr);
         // Removing LRU entry
         if (table.size() >= this->size) {
@@ -427,10 +421,10 @@ class FilterTable {
         }
     }
 
-    void remove(uint64_t region_number, int offset) {
+    void remove(uint64_t addr) {
         auto iter = table.begin();
         while(iter != table.end()) {
-            if((*iter)->matches(region_number, offset, this->pattern_len)) {
+            if((*iter)->matches(addr)) {
                 iter = table.erase(iter);
             } else {
                 iter++;
@@ -441,38 +435,18 @@ class FilterTable {
 
 class AccumulationTableData {
   public:
+    uint64_t region_start;
+    uint64_t region_end;
     uint64_t pc;
-    uint64_t region;
-    int offset;
-    vector<int> pattern;
+    vector<bool> pattern;
     // Constructor
-    AccumulationTableData(uint64_t pc, uint64_t region, int offset, vector<int> pattern) :
-        pc(pc), region(region), offset(offset), pattern(pattern) {};
-    
-    // Copy Constructor
-    AccumulationTableData(const AccumulationTableData *other) : 
-        pc(other->pc), region(other->region), offset(other->offset), pattern(other->pattern) {};
+    AccumulationTableData(uint64_t pc, uint64_t region_start, uint64_t region_end, vector<bool> pattern) :
+        pc(pc), region_start(region_start), region_end(region_end), pattern(pattern) {};
      
     // Overload comparison operator to check half size region around entry
-    bool matches(uint64_t other_region, int other_offset, int size) {
-        // return other_region == this->region;
-        return get_abs_diff(other_region, other_offset, size) <= size / 2;
+    bool matches(uint64_t other_region) {
+        return region_start <= other_region && other_region < region_end;
     }
-
-    uint64_t get_abs_diff(uint64_t other_region, int other_offset, int size) {
-        int64_t other_addr = other_region * size + other_offset;
-        int64_t my_addr = this->region * size + this->offset;
-        int64_t abs_diff = labs(other_addr - my_addr);
-        return abs_diff;
-    }
-    uint64_t get_diff(uint64_t other_region, int other_offset, int size) {
-        int64_t other_addr = other_region * size + other_offset;
-        int64_t my_addr = this->region * size + this->offset;
-        int64_t diff = other_addr - my_addr;
-        assert(diff >= -size && diff <= size);
-        return diff;
-    }
-    
 };
 
 class AccumulationTable {
@@ -486,12 +460,12 @@ class AccumulationTable {
     /**
      * @return A return value of false means that the tag wasn't found in the table and true means success.
      */
-    bool set_pattern(uint64_t region_number, int offset) {
+    bool set_pattern(uint64_t addr) {
         vector<shared_ptr<AccumulationTableData>> found;
         // Search for matching values
         auto iter = table.begin();
         while(iter != table.end()) {
-            if((*iter)->matches(region_number, offset, this->pattern_len)) {
+            if((*iter)->matches(addr)) {
                 found.push_back(*iter);
                 iter = table.erase(iter);
             } else {
@@ -503,16 +477,15 @@ class AccumulationTable {
             return false;
         // Found a matches, make LRU
         for (auto match : found) {
-            match->pattern.push_back(match->get_diff(region_number, offset, this->pattern_len));
+            match->pattern[addr - match->region_start] = true;
             table.insert(table.begin(), match);
         }
         return true;
     }
 
     shared_ptr<AccumulationTableData> insert(shared_ptr<FilterTableData> data) {
-        vector<int> pattern;
-        shared_ptr<AccumulationTableData> new_data(new AccumulationTableData(data->pc, data->region, data->offset, pattern));
-        new_data->pattern.push_back(new_data->get_diff(data->region, data->offset, this->size));
+        vector<bool> pattern(this->pattern_len, false);
+        shared_ptr<AccumulationTableData> new_data(new AccumulationTableData(data->pc, data->region_start, data->region_end, pattern));
         table.insert(table.begin(), new_data);
         // Removing LRU entry
         shared_ptr<AccumulationTableData> removed = nullptr;
@@ -523,13 +496,12 @@ class AccumulationTable {
         }
         return removed;
     }
-    vector<shared_ptr<AccumulationTableData>> remove(uint64_t region, int offset) {
+    vector<shared_ptr<AccumulationTableData>> remove(uint64_t addr) {
         vector<shared_ptr<AccumulationTableData>> removed;
-
         // Remove elements
         auto iter = table.begin();
         while(iter != table.end()) {
-            if((*iter)->matches(region, offset, this->pattern_len)) {
+            if((*iter)->matches(addr)) {
                 removed.push_back(*iter);
                 iter = table.erase(iter);
             } else {
@@ -575,7 +547,7 @@ template <class T> vector<T> my_rotate(const vector<T> &x, int n) {
 
 class PatternHistoryTableData {
     public:
-        vector<int> pattern;
+        vector<bool> pattern;
 };
 
 class PatternHistoryTable : LRUSetAssociativeCache<PatternHistoryTableData> {
@@ -596,7 +568,7 @@ class PatternHistoryTable : LRUSetAssociativeCache<PatternHistoryTableData> {
     }
 
     /* address is actually block number */
-    void insert(uint64_t pc, uint64_t address, vector<int> pattern) {
+    void insert(uint64_t pc, uint64_t address, vector<bool> pattern) {
         uint64_t key = this->build_key(pc, address);
         Entry victim = Super::insert(key, {pattern});
         this->set_mru(key);
@@ -606,7 +578,7 @@ class PatternHistoryTable : LRUSetAssociativeCache<PatternHistoryTableData> {
      * @return An un-rotated pattern if match was found, otherwise an empty vector.
      * Finds best match and in case of ties, uses the MRU entry.
      */
-    vector<int> find(uint64_t pc, uint64_t address) {
+    vector<bool> find(uint64_t pc, uint64_t address) {
         uint64_t key = this->build_key(pc, address);
         uint64_t index = key % this->num_sets;
         uint64_t tag = key / this->num_sets;
@@ -616,8 +588,8 @@ class PatternHistoryTable : LRUSetAssociativeCache<PatternHistoryTableData> {
         // PC + Offset mask
         uint64_t max_tag_mask = (1 << (this->pc_width + this->max_addr_width - this->index_len)) - 1;
         // Keeping track of the footprints for voting
-        vector<vector<int>> min_matches;
-        vector<int> pattern;
+        vector<vector<bool>> min_matches;
+        vector<bool> pattern;
         // Checking all the associative tables
         for (int i = 0; i < this->num_ways; i += 1) {
             // Ignore invalid sets
@@ -627,7 +599,7 @@ class PatternHistoryTable : LRUSetAssociativeCache<PatternHistoryTableData> {
             bool min_match = ((set[i].tag & min_tag_mask) == (tag & min_tag_mask));
             // Matching for the long event (PC + Address)
             bool max_match = ((set[i].tag & max_tag_mask) == (tag & max_tag_mask));
-            vector<int> &cur_pattern = set[i].data.pattern;
+            vector<bool> &cur_pattern = set[i].data.pattern;
             // Check for match in long event first
             if (max_match) {
                 this->set_mru(set[i].key);
@@ -669,25 +641,17 @@ class PatternHistoryTable : LRUSetAssociativeCache<PatternHistoryTableData> {
         return key;
     }
 
-    vector<int> vote(const vector<vector<int>> &x, float thresh = THRESH) {
-        int n = x.size();
-        vector<int> ret;
-        map<int, int> counts;
-        for (int way = 0; way < n; way++) {
-            for (int addr : x[way]) {
-                // Not found in map, add it
-                if (counts.find(addr) == counts.end()) {
-                    counts[addr] = 1;
-                // Increment counter
-                } else {
-                    counts[addr] += 1;
-                }
+    vector<bool> vote(const vector<vector<bool>> &x, float thresh = THRESH) {
+        int elems = this->pattern_len;
+        int ways = x.size();
+        vector<bool> ret(this->pattern_len, false);
+        for (int col = 0; col < elems; col++) {
+            float sum = 0.0;
+            for (int way = 0; way < ways; way++) {
+                sum += x[way][col] ? 1.0 : 0.0;
             }
-        }
-        for (const auto& elem : counts) {
-            // If value exceeds threshold, add it to fetch list
-            if (1.0 * elem.second / n >= THRESH) {
-                ret.push_back(elem.first);
+            if (sum / ways >= THRESH) {
+                ret[col] = true;
             }
         }
         return ret;
@@ -715,30 +679,30 @@ class Bingo {
         if (this->debug_level >= 1) {
             cerr << "[Bingo] access(block_number=" << block_number << ", pc=" << pc << ")" << endl;
         }
-        uint64_t region_number = block_number / this->pattern_len;
-        int region_offset = block_number % this->pattern_len;
         // While regions exist in accumulation table, update history and don't prefetch
         // This is effectively "training" the prefetcher
-        bool success = this->accumulation_table.set_pattern(region_number, region_offset);
+        bool success = this->accumulation_table.set_pattern(block_number);
         if (success) {
             accum_no_prefs++;
             return vector<uint64_t>();
         }
-        vector<shared_ptr<FilterTableData>> entries = this->filter_table.find(region_number, region_offset);
+        vector<shared_ptr<FilterTableData>> entries = this->filter_table.find(block_number);
         // If miss in the filter table, create new filter table entry
         if (entries.size() == 0) {
             // Trigger access is the act of missing in the filter table
-            this->filter_table.insert(region_number, pc, region_offset);
+            this->filter_table.insert(block_number, pc);
             // If not in filter or accumulation table, check PHT for triggering access
-            vector<int> pattern = this->find_in_phts(pc, block_number);
+            vector<bool> pattern = this->find_in_phts(pc, block_number);
             if (pattern.empty())
                 return vector<uint64_t>();
             vector<uint64_t> to_prefetch;
             for (int i = 0; i < pattern.size(); i += 1) {
-                uint64_t prefetch_block = region_number * this->pattern_len + pattern[i] + region_offset;
-                // If the prefetch target is not in the overpredictions vector prefetch it
-                if (find(this->overpredictions.begin(), this->overpredictions.end(), prefetch_block) == this->overpredictions.end())
-                    to_prefetch.push_back(prefetch_block);
+                if (pattern[i]) {
+                    uint64_t prefetch_block = block_number + i - this->pattern_len / 2;
+                    // If the prefetch target is not in the overpredictions vector prefetch it
+                    if (find(this->overpredictions.begin(), this->overpredictions.end(), prefetch_block) == this->overpredictions.end())
+                        to_prefetch.push_back(prefetch_block);
+                }
             }
             static int issued = 0;
             issued += to_prefetch.size();
@@ -747,13 +711,13 @@ class Bingo {
 
         // If hit in filter table, with different triggering access transfer data to accumulation table
         for (auto entry : entries) {
-            if (!(entry->offset == region_offset && entry->region == region_number)) {
+            if (entry->region_start + this->pattern_len / 2 != (uint64_t) block_number) {
                 // Get evicted entry from the accumulation table if exists
                 shared_ptr<AccumulationTableData> victim = this->accumulation_table.insert(entry);
                 // Add entry to the accumulation table
-                this->accumulation_table.set_pattern(region_number, region_offset);
+                this->accumulation_table.set_pattern(block_number);
                 // Remove entry in the filter table
-                this->filter_table.remove(region_number, region_offset);
+                this->filter_table.remove(block_number);
                 // Check if evicted entry is valid, and if so, move to PHT
                 if (victim) {
                     /* move from accumulation table to pattern history table */
@@ -769,10 +733,8 @@ class Bingo {
             cerr << "[Bingo] eviction(block_number=" << block_number << ")" << endl;
         }
         /* end of generation */
-        uint64_t region_number = block_number / this->pattern_len;
-        int region_offset = block_number % this->pattern_len;
-        this->filter_table.remove(region_number, region_offset);
-        vector<shared_ptr<AccumulationTableData>> entries = this->accumulation_table.remove(region_number, region_offset);
+        this->filter_table.remove(block_number);
+        vector<shared_ptr<AccumulationTableData>> entries = this->accumulation_table.remove(block_number);
         for (auto entry : entries) {
             /* move from accumulation table to pattern history table */
             this->insert_in_phts(entry);
@@ -833,11 +795,11 @@ class Bingo {
     }
 
   private:
-    vector<int> find_in_phts(uint64_t pc, uint64_t address) {
+    vector<bool> find_in_phts(uint64_t pc, uint64_t address) {
         if (this->debug_level >= 1) {
             cerr << "[Bingo] find_in_phts(pc=" << pc << ", address=" << address << ")" << endl;
         }
-        vector<int> pattern = this->pht.find(pc, address);
+        vector<bool> pattern = this->pht.find(pc, address);
         uint64_t region_number = address / this->pattern_len;
         events[region_number] = this->pht.get_last_event();
         return pattern;
@@ -849,8 +811,9 @@ class Bingo {
             cerr << "[Bingo] insert_in_phts(...)" << endl;
         }
         uint64_t pc = entry->pc;
-        uint64_t address = entry->region * this->pattern_len + entry->offset;
-        vector<int> pattern(entry->pattern);
+        uint64_t address = entry->region_start + this->pattern_len / 2;
+        vector<bool> pattern(entry->pattern);
+        pattern[this->pattern_len / 2] = true;
         this->pht.insert(pc, address, pattern);
     }
 
@@ -960,8 +923,6 @@ void CACHE::llc_prefetcher_roi_stats_(uint32_t cpu) {
     
     cout << "* CPU " << cpu << " ROI PC+Address Overpredictions: " << roi_overpredict_cnt[cpu][PC_ADDRESS] << endl;
     cout << "* CPU " << cpu << " ROI PC+Offset Overpredictions: "  << roi_overpredict_cnt[cpu][PC_OFFSET]  << endl;
- 
-    cout << "* CPU " << cpu << " ROI Accum Table No Prefetches: "  << roi_accum_no_prefs[cpu] << endl;
 }
 
 void CACHE::llc_prefetcher_final_stats_(uint32_t cpu) {
@@ -970,6 +931,4 @@ void CACHE::llc_prefetcher_final_stats_(uint32_t cpu) {
 
     cout << "* CPU " << cpu << " Total PC+Address Covered Misses: " << prefetchers[cpu].get_cover_cnt(PC_ADDRESS) << endl;
     cout << "* CPU " << cpu << " Total PC+Offset Covered Misses: "  << prefetchers[cpu].get_cover_cnt(PC_OFFSET)  << endl;
-    
-    cout << "* CPU " << cpu << " ROI Accum Table No Prefetches: "  << prefetchers[cpu].get_accum_no_prefs() << endl;
 }
