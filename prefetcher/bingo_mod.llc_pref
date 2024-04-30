@@ -2,8 +2,34 @@
 
 #include "cache.h"
 #include <bits/stdc++.h>
+//*PLINKO ADDITION
+#include <fstream> 
+#include <typeinfo>
+//END OF PLINKO ADDITION*/
 
 using namespace std;
+
+
+//*PLINKO ADDITION
+//BENCHMARK CONFIGURATION CONSTANTS
+#define DO_PHT_SNAPSHOTS 1
+#define SNAPSHOT_INTERVAL 100000
+#define SNAPSHOT_FILE_BASE_NAME "results_4core/PHT_Snapshot_"
+#define MAX_SNAPSHOT_FILES 20
+
+long long int accessNumber = 0;
+long long int filesWritten = 0;
+
+//END PLINKO ADDITION*/
+
+/* Bingo settings */
+const int REGION_SIZE = 2 * 1024;
+const int MIN_ADDR_WIDTH = 5;
+const int MAX_ADDR_WIDTH = 16;
+const int PC_WIDTH = 16;
+const int PHT_SIZE = 16 * 1024;
+const int FT_SIZE = 64;
+const int AT_SIZE = 128;
 
 class Table {
   public:
@@ -52,13 +78,13 @@ class Table {
             widths.push_back(max_width + 2);
         }
         string out;
-        out += Table::top_line(widths);
+        //out += Table::top_line(widths);
         out += this->data_row(0, widths);
         for (unsigned i = 1; i < this->height; i += 1) {
-            out += Table::mid_line(widths);
+            //out += Table::mid_line(widths);
             out += this->data_row(i, widths);
         }
-        out += Table::bot_line(widths);
+        //out += Table::bot_line(widths);
         return out;
     }
 
@@ -67,9 +93,9 @@ class Table {
         for (unsigned i = 0; i < this->width; i += 1) {
             string data = this->cells[row][i];
             data.resize(widths[i] - 2, ' ');
-            out += " | " + data;
+            out += " " + data;
         }
-        out += " |\n";
+        out += "\n";
         return out;
     }
 
@@ -83,8 +109,8 @@ class Table {
         string out = " " + left;
         for (unsigned i = 0; i < widths.size(); i += 1) {
             int w = widths[i];
-            for (int j = 0; j < w; j += 1)
-                out += "─";
+            //for (int j = 0; j < w; j += 1)
+            //    out += "─";
             if (i != widths.size() - 1)
                 out += mid;
             else
@@ -254,6 +280,17 @@ template <class T> class SetAssociativeCache {
             write_data(valid_entries[i], table, i + 1);
         return table.to_string();
     }
+
+    //*PLINKO ADDITION
+    static void write_entry(Entry &entry, Table &table, int row) {
+        table.set_cell(row, 0, std::to_string(entry.key));
+        string footprintStr = "";
+        for(int i = FT_SIZE-1; i >= 0; i--) { //MSB on left side of string
+            footprintStr += std::to_string(entry.data.pattern[i]);
+        }
+        table.set_cell(row, 1, footprintStr);
+    }
+    //END OF PLINKO ADDITION*/
 
     void set_debug_level(int debug_level) { this->debug_level = debug_level; }
 
@@ -446,7 +483,7 @@ class PatternHistoryTableData {
     vector<bool> pattern;
 };
 
-class PatternHistoryTable : LRUSetAssociativeCache<PatternHistoryTableData> {
+class PatternHistoryTable : public LRUSetAssociativeCache<PatternHistoryTableData> {
     typedef LRUSetAssociativeCache<PatternHistoryTableData> Super;
 
   public:
@@ -482,21 +519,30 @@ class PatternHistoryTable : LRUSetAssociativeCache<PatternHistoryTableData> {
         uint64_t index = key % this->num_sets;
         uint64_t tag = key / this->num_sets;
         auto &set = this->entries[index];
+        // PC + Address mask
         uint64_t min_tag_mask = (1 << (this->pc_width + this->min_addr_width - this->index_len)) - 1;
+        // PC + Offset mask
         uint64_t max_tag_mask = (1 << (this->pc_width + this->max_addr_width - this->index_len)) - 1;
+        // Keeping track of the footprints for voting
         vector<vector<bool>> min_matches;
         vector<bool> pattern;
+        // Checking all the associative tables
         for (int i = 0; i < this->num_ways; i += 1) {
+            // Ignore invalid sets
             if (!set[i].valid)
                 continue;
+            // Matching the tag for the short event (PC + Offset)
             bool min_match = ((set[i].tag & min_tag_mask) == (tag & min_tag_mask));
+            // Matching for the long event (PC + Address)
             bool max_match = ((set[i].tag & max_tag_mask) == (tag & max_tag_mask));
             vector<bool> &cur_pattern = set[i].data.pattern;
+            // Check for match in long event first
             if (max_match) {
                 this->set_mru(set[i].key);
                 pattern = cur_pattern;
                 break;
             }
+            // If no matches in long event check for short event match
             if (min_match) {
                 min_matches.push_back(cur_pattern);
             }
@@ -556,24 +602,49 @@ class PatternHistoryTable : LRUSetAssociativeCache<PatternHistoryTableData> {
 
 class Bingo {
   public:
+    // Pattern length is the number of cache lines in a region
     Bingo(int pattern_len, int min_addr_width, int max_addr_width, int pc_width, int pattern_history_table_size,
         int filter_table_size, int accumulation_table_size)
         : pattern_len(pattern_len), filter_table(filter_table_size),
           accumulation_table(accumulation_table_size, pattern_len),
-          pht(pattern_history_table_size, pattern_len, min_addr_width, max_addr_width, pc_width) {}
+          pht(pattern_history_table_size, pattern_len, min_addr_width, max_addr_width, pc_width) 
+    {
+        //*PLINKO ADDITION
+        headers.push_back("Key");
+        headers.push_back("Footprint");
+        //END OF PLINKO ADDITION*/
+    }
 
     /**
      * @return A vector of block numbers that should be prefetched.
      */
     vector<uint64_t> access(uint64_t block_number, uint64_t pc) {
+        //*PLINKO ADDITION
+        if(DO_PHT_SNAPSHOTS) {
+            accessNumber++;
+
+            if(accessNumber >= SNAPSHOT_INTERVAL * (filesWritten + 1) && filesWritten < MAX_SNAPSHOT_FILES) {
+                ofstream outFile;
+                outFile.open(SNAPSHOT_FILE_BASE_NAME + std::to_string(accessNumber), std::ofstream::out);
+                outFile << this->pht.log(headers, SetAssociativeCache<PatternHistoryTableData>::write_entry);
+                outFile.close();
+                filesWritten++;
+            }
+        }
+        //END OF PLINKO ADDITION*/
+
         if (this->debug_level >= 1) {
             cerr << "[Bingo] access(block_number=" << block_number << ", pc=" << pc << ")" << endl;
         }
         uint64_t region_number = block_number / this->pattern_len;
         int region_offset = block_number % this->pattern_len;
+        // Footprinting the access in the accumulation table
         bool success = this->accumulation_table.set_pattern(region_number, region_offset);
+        // If accumulation table contains region update value in footprint don't prefetch
         if (success)
             return vector<uint64_t>();
+
+        // 
         FilterTable::Entry *entry = this->filter_table.find(region_number);
         if (!entry) {
             /* trigger access */
@@ -690,16 +761,12 @@ class Bingo {
     uint64_t prefetch_cnt[2] = {0};
     uint64_t cover_cnt[2] = {0};
     uint64_t overpredict_cnt[2] = {0};
-};
 
-/* Bingo settings */
-const int REGION_SIZE = 2 * 1024;
-const int MIN_ADDR_WIDTH = 5;
-const int MAX_ADDR_WIDTH = 16;
-const int PC_WIDTH = 16;
-const int PHT_SIZE = 16 * 1024;
-const int FT_SIZE = 64;
-const int AT_SIZE = 128;
+    //*PLINKO ADDITION
+    //ofstream outFile;
+    vector<string> headers;
+    //END OF PLINKO ADDITION*/
+};
 
 vector<Bingo> prefetchers;
 
@@ -721,7 +788,7 @@ void CACHE::llc_prefetcher_initialize_(uint32_t cpu) {
 }
 
 void CACHE::llc_prefetcher_operate_(uint32_t cpu, uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type) {
-    uint64_t block_number = addr >> LOG2_BLOCK_SIZE;
+    uint64_t block_number = addr >> LOG2_BLOCK_SIZE; // Bingo prefetches at the cache block level, aka 64 bytes
     
     for (int i = 0; i < NUM_CPUS; i += 1) {
         int cnt = prefetched_blocks[i].erase(block_number);
@@ -730,12 +797,10 @@ void CACHE::llc_prefetcher_operate_(uint32_t cpu, uint64_t addr, uint64_t ip, ui
     }
 
     /* call prefetcher and send prefetches */
-<<<<<<< HEAD
     // IP is the current PC
-=======
->>>>>>> 7d863d7 (bingo PHT trace generation, other minor fixes)
     vector<uint64_t> to_prefetch = prefetchers[cpu].access(block_number, ip);
     for (auto &pf_block_number : to_prefetch) {
+        // Generating prefetches for the specified blocks from the prefetcher
         uint64_t pf_address = pf_block_number << LOG2_BLOCK_SIZE;
         prefetch_line(cpu, ip, addr, pf_address, FILL_LLC);
     }
@@ -793,11 +858,4 @@ void CACHE::llc_prefetcher_final_stats_(uint32_t cpu) {
 
     cout << "* CPU " << cpu << " Total PC+Address Covered Misses: " << prefetchers[cpu].get_cover_cnt(PC_ADDRESS) << endl;
     cout << "* CPU " << cpu << " Total PC+Offset Covered Misses: "  << prefetchers[cpu].get_cover_cnt(PC_OFFSET)  << endl;
-<<<<<<< HEAD
 }
-=======
-    
-    cout << "* CPU " << cpu << " Total PC+Address Overpredictions: " << prefetchers[cpu].get_overpredict_cnt(PC_ADDRESS) << endl;
-    cout << "* CPU " << cpu << " Total PC+Offset Overpredictions: "  << prefetchers[cpu].get_overpredict_cnt(PC_OFFSET)  << endl;
-}
->>>>>>> 7d863d7 (bingo PHT trace generation, other minor fixes)

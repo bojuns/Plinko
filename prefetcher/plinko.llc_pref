@@ -392,6 +392,7 @@ class AccumulationTableData {
     uint64_t pc;
     int offset;
     vector<bool> pattern;
+    bool coalesced;
 };
 
 class AccumulationTable : public LRUFullyAssociativeCache<AccumulationTableData> {
@@ -406,26 +407,77 @@ class AccumulationTable : public LRUFullyAssociativeCache<AccumulationTableData>
     /**
      * @return A return value of false means that the tag wasn't found in the table and true means success.
      */
-    bool set_pattern(uint64_t region_number, int offset) {
+    bool set_pattern(uint64_t region_number, int offset, bool value) {
+        static int counter = 0;
+        static uint64_t adjacentEntries = 0;
+        static uint64_t totalEntries = 0;
+        static uint64_t evenEntries = 0;
         Entry *entry = Super::find(region_number);
-        if (!entry)
-            return false;
-        entry->data.pattern[offset] = true;
-        this->set_mru(region_number);
-        return true;
+        // Entry found in accumulation table, update entry at offset
+        if (entry) {
+            entry->data.pattern[offset] = value;
+            this->set_mru(region_number);
+            return true;
+        }
+        return false;
+        // // Checking if region can be coalesced
+        // if (region_number % 2 == 0) {
+        //     // Even region number, check up
+        //     entry = Super::find(region_number + 1);
+        // } else {
+        //     // Odd region number, check down
+        //     entry = Super::find(region_number - 1);
+        // }
+        // // No coalescable regions found
+        // if (!entry) return false;
+        // // See if region already coalesced
+        // if (entry->data.coalesced) {
+        // } else {
+        //     entry->data.coalesced = true;
+        //     counter++;
+        //     for (int i = 0; i < this->pattern_len; i++) {
+        //         if (entry->data.pattern[i]) {
+        //             if (i % 2 == 0) {
+        //                 evenEntries++;
+        //                 if (entry->data.pattern[i] && entry->data.pattern[i+1])
+        //                     adjacentEntries++;
+        //             }
+        //             totalEntries++;
+        //         }
+        //     }
+        //     if (counter % 1000 == 0)
+        //         printf("Coalesced regions: %d, Adjacency: %d/%d (%f), Even: %d\n", counter, adjacentEntries, totalEntries, (float) (adjacentEntries) / totalEntries, evenEntries);
+        // }
+        // return false;
     }
 
     Entry insert(FilterTable::Entry &entry) {
         assert(!this->find(entry.key));
         vector<bool> pattern(this->pattern_len, false);
         pattern[entry.data.offset] = true;
-        Entry old_entry = Super::insert(entry.key, {entry.data.pc, entry.data.offset, pattern});
+        Entry old_entry = Super::insert(entry.key, {entry.data.pc, entry.data.offset, pattern, false});
         this->set_mru(entry.key);
         return old_entry;
     }
-
   private:
     int pattern_len;
+};
+
+class PrefetchQualityTableData {
+    public:
+        bool isUseful;
+};
+
+class PrefetchQualityTable : public LRUFullyAssociativeCache<PrefetchQualityTableData> {
+    typedef LRUFullyAssociativeCache<PrefetchQualityTableData> Super;
+    public:
+    PrefetchQualityTable(int size) : Super(size) {
+        assert(__builtin_popcount(size) == 1);
+    } 
+    Entry insert(int region_number, bool useful) {
+        Entry old_entry = Super::insert(region_number, {useful});
+        return old_entry;
+    }  
 };
 
 enum Event { PC_ADDRESS = 0, PC_OFFSET = 1 };
@@ -442,8 +494,8 @@ template <class T> vector<T> my_rotate(const vector<T> &x, int n) {
 #define THRESH 0.20
 
 class PatternHistoryTableData {
-  public:
-    vector<bool> pattern;
+    public:
+        vector<bool> pattern;
 };
 
 class PatternHistoryTable : LRUSetAssociativeCache<PatternHistoryTableData> {
@@ -482,21 +534,30 @@ class PatternHistoryTable : LRUSetAssociativeCache<PatternHistoryTableData> {
         uint64_t index = key % this->num_sets;
         uint64_t tag = key / this->num_sets;
         auto &set = this->entries[index];
+        // PC + Address mask
         uint64_t min_tag_mask = (1 << (this->pc_width + this->min_addr_width - this->index_len)) - 1;
+        // PC + Offset mask
         uint64_t max_tag_mask = (1 << (this->pc_width + this->max_addr_width - this->index_len)) - 1;
+        // Keeping track of the footprints for voting
         vector<vector<bool>> min_matches;
         vector<bool> pattern;
+        // Checking all the associative tables
         for (int i = 0; i < this->num_ways; i += 1) {
+            // Ignore invalid sets
             if (!set[i].valid)
                 continue;
+            // Matching the tag for the short event (PC + Offset)
             bool min_match = ((set[i].tag & min_tag_mask) == (tag & min_tag_mask));
+            // Matching for the long event (PC + Address)
             bool max_match = ((set[i].tag & max_tag_mask) == (tag & max_tag_mask));
             vector<bool> &cur_pattern = set[i].data.pattern;
+            // Check for match in long event first
             if (max_match) {
                 this->set_mru(set[i].key);
                 pattern = cur_pattern;
                 break;
             }
+            // If no matches in long event check for short event match
             if (min_match) {
                 min_matches.push_back(cur_pattern);
             }
@@ -556,6 +617,7 @@ class PatternHistoryTable : LRUSetAssociativeCache<PatternHistoryTableData> {
 
 class Bingo {
   public:
+    // Pattern length is the number of cache lines in a region
     Bingo(int pattern_len, int min_addr_width, int max_addr_width, int pc_width, int pattern_history_table_size,
         int filter_table_size, int accumulation_table_size)
         : pattern_len(pattern_len), filter_table(filter_table_size),
@@ -566,32 +628,47 @@ class Bingo {
      * @return A vector of block numbers that should be prefetched.
      */
     vector<uint64_t> access(uint64_t block_number, uint64_t pc) {
+        static int prevented = 0;
         if (this->debug_level >= 1) {
             cerr << "[Bingo] access(block_number=" << block_number << ", pc=" << pc << ")" << endl;
         }
         uint64_t region_number = block_number / this->pattern_len;
         int region_offset = block_number % this->pattern_len;
-        bool success = this->accumulation_table.set_pattern(region_number, region_offset);
-        if (success)
+        // While regions exist in accumulation table, update history and don't prefetch
+        // This is effectively "training" the prefetcher
+        bool success = this->accumulation_table.set_pattern(region_number, region_offset, true);
+        if (success) {
+            accum_no_prefs++;
             return vector<uint64_t>();
+        }
         FilterTable::Entry *entry = this->filter_table.find(region_number);
+        // If miss in the filter table, create new filter table entry
         if (!entry) {
-            /* trigger access */
+            // Trigger access is the act of missing in the filter table
             this->filter_table.insert(region_number, pc, region_offset);
+            // If not in filter or accumulation table, check PHT for triggering access
             vector<bool> pattern = this->find_in_phts(pc, block_number);
             if (pattern.empty())
                 return vector<uint64_t>();
             vector<uint64_t> to_prefetch;
             for (int i = 0; i < this->pattern_len; i += 1)
-                if (pattern[i])
-                    to_prefetch.push_back(region_number * this->pattern_len + i);
+                if (pattern[i]) {
+                    uint64_t prefetch_block = region_number * this->pattern_len + i;
+                    // If the prefetch target is not in the overpredictions vector prefetch it
+                    if (find(this->overpredictions.begin(), this->overpredictions.end(), prefetch_block) == this->overpredictions.end())
+                        to_prefetch.push_back(prefetch_block);
+                }
             return to_prefetch;
         }
+        // If hit in filter table, transfer data to accumulation table
         if (entry->data.offset != region_offset) {
-            /* move from filter table to accumulation table */
+            // Get evicted entry from the accumulation table if exists
             AccumulationTable::Entry victim = this->accumulation_table.insert(*entry);
-            this->accumulation_table.set_pattern(region_number, region_offset);
+            // Add entry to the accumulation table
+            this->accumulation_table.set_pattern(region_number, region_offset, true);
+            // Remove entry in the filter table
             this->filter_table.erase(region_number);
+            // Check if evicted entry is valid, and if so, move to PHT
             if (victim.valid) {
                 /* move from accumulation table to pattern history table */
                 this->insert_in_phts(victim);
@@ -617,7 +694,6 @@ class Bingo {
     void set_debug_level(int debug_level) { this->debug_level = debug_level; }
 
     /* stats */
-
     void add_prefetch(uint64_t block_number) {
         uint64_t region_number = block_number / this->pattern_len;
         Event ev = this->events[region_number];
@@ -633,6 +709,15 @@ class Bingo {
     void add_overpredict(uint64_t block_number) {
         uint64_t region_number = block_number / this->pattern_len;
         Event ev = this->events[region_number];
+        int region_offset = block_number % this->pattern_len;
+        // Add overprediction to fully associative cache
+        vector<uint64_t>::iterator first = find(this->overpredictions.begin(), this->overpredictions.end(), block_number);
+        if (first != this->overpredictions.end()) {
+            this->overpredictions.erase(first);
+        } else if (this->overpredictions.size() == 512) {
+            this->overpredictions.erase(this->overpredictions.begin());
+        }
+        this->overpredictions.push_back(block_number);
         this->overpredict_cnt[ev] += 1;
     }
 
@@ -655,6 +740,9 @@ class Bingo {
     uint64_t get_overpredict_cnt(Event ev) {
         return this->overpredict_cnt[ev];
     }
+    uint64_t get_accum_no_prefs() {
+        return this->accum_no_prefs;
+    }
 
   private:
     vector<bool> find_in_phts(uint64_t pc, uint64_t address) {
@@ -668,13 +756,13 @@ class Bingo {
     }
 
     void insert_in_phts(const AccumulationTable::Entry &entry) {
+        static int counter = 0;
         if (this->debug_level >= 1) {
             cerr << "[Bingo] insert_in_phts(...)" << endl;
         }
         uint64_t pc = entry.data.pc;
         uint64_t address = entry.key * this->pattern_len + entry.data.offset;
-        const vector<bool> &pattern = entry.data.pattern;
-        this->pht.insert(pc, address, pattern);
+        this->pht.insert(pc, address, entry.data.pattern);
     }
 
     int pattern_len;
@@ -682,11 +770,11 @@ class Bingo {
     AccumulationTable accumulation_table;
     PatternHistoryTable pht;
     int debug_level = 0;
+    vector<uint64_t> overpredictions;
 
     /* stats */
-
     unordered_map<uint64_t, Event> events;
-    
+    uint64_t accum_no_prefs = 0;
     uint64_t prefetch_cnt[2] = {0};
     uint64_t cover_cnt[2] = {0};
     uint64_t overpredict_cnt[2] = {0};
@@ -709,6 +797,7 @@ unordered_set<uint64_t> prefetched_blocks[NUM_CPUS];
 uint64_t roi_prefetch_cnt[NUM_CPUS][2] = {0};
 uint64_t roi_cover_cnt[NUM_CPUS][2] = {0};
 uint64_t roi_overpredict_cnt[NUM_CPUS][2] = {0};
+uint64_t roi_accum_no_prefs[NUM_CPUS] = {0};
 
 void CACHE::llc_prefetcher_initialize_(uint32_t cpu) {
     if (cpu != 0)
@@ -728,14 +817,10 @@ void CACHE::llc_prefetcher_operate_(uint32_t cpu, uint64_t addr, uint64_t ip, ui
         if (cnt == 1)
             prefetchers[i].add_cover(block_number);
     }
-
-    /* call prefetcher and send prefetches */
-<<<<<<< HEAD
     // IP is the current PC
-=======
->>>>>>> 7d863d7 (bingo PHT trace generation, other minor fixes)
     vector<uint64_t> to_prefetch = prefetchers[cpu].access(block_number, ip);
     for (auto &pf_block_number : to_prefetch) {
+        // Generating prefetches for the specified blocks from the prefetcher
         uint64_t pf_address = pf_block_number << LOG2_BLOCK_SIZE;
         prefetch_line(cpu, ip, addr, pf_address, FILL_LLC);
     }
@@ -773,6 +858,7 @@ void CACHE::llc_prefetcher_inform_roi_complete_(uint32_t cpu) {
         roi_prefetch_cnt[cpu][i] = prefetchers[cpu].get_prefetch_cnt(static_cast<Event>(i));
         roi_cover_cnt[cpu][i] = prefetchers[cpu].get_cover_cnt(static_cast<Event>(i));
         roi_overpredict_cnt[cpu][i] = prefetchers[cpu].get_overpredict_cnt(static_cast<Event>(i));
+        roi_accum_no_prefs[cpu] = prefetchers[cpu].get_accum_no_prefs();
     }
 }
 
@@ -785,6 +871,8 @@ void CACHE::llc_prefetcher_roi_stats_(uint32_t cpu) {
     
     cout << "* CPU " << cpu << " ROI PC+Address Overpredictions: " << roi_overpredict_cnt[cpu][PC_ADDRESS] << endl;
     cout << "* CPU " << cpu << " ROI PC+Offset Overpredictions: "  << roi_overpredict_cnt[cpu][PC_OFFSET]  << endl;
+ 
+    cout << "* CPU " << cpu << " ROI Accum Table No Prefetches: "  << roi_accum_no_prefs[cpu] << endl;
 }
 
 void CACHE::llc_prefetcher_final_stats_(uint32_t cpu) {
@@ -793,11 +881,6 @@ void CACHE::llc_prefetcher_final_stats_(uint32_t cpu) {
 
     cout << "* CPU " << cpu << " Total PC+Address Covered Misses: " << prefetchers[cpu].get_cover_cnt(PC_ADDRESS) << endl;
     cout << "* CPU " << cpu << " Total PC+Offset Covered Misses: "  << prefetchers[cpu].get_cover_cnt(PC_OFFSET)  << endl;
-<<<<<<< HEAD
-}
-=======
     
-    cout << "* CPU " << cpu << " Total PC+Address Overpredictions: " << prefetchers[cpu].get_overpredict_cnt(PC_ADDRESS) << endl;
-    cout << "* CPU " << cpu << " Total PC+Offset Overpredictions: "  << prefetchers[cpu].get_overpredict_cnt(PC_OFFSET)  << endl;
+    cout << "* CPU " << cpu << " ROI Accum Table No Prefetches: "  << prefetchers[cpu].get_accum_no_prefs() << endl;
 }
->>>>>>> 7d863d7 (bingo PHT trace generation, other minor fixes)
