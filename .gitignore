@@ -4,3 +4,8 @@ traces/*
 results_4core/*
 results_new/*
 .*
+analysis/stats/*
+analysis/stats_old/*
+trace_input/*
+tracer/*
+benchmark/*

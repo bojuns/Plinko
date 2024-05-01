@@ -35,7 +35,7 @@ def sort_by_num_ones(e):
     return e[0] * e[1].count('1')
 
 
-# converts PHT trace into a single string for processing
+# converts PHT trace into an array of footprint strings for processing
 def parse_pht_file(path):
     trace = open(path, 'r')
     lines = trace.readlines()
@@ -45,28 +45,27 @@ def parse_pht_file(path):
         tok = re.split(" +", lines[i].strip())
         entries.append([int(tok[0]), tok[1]])
 
-    entries.sort(key=sort_by_first_elem)
-    base = entries[0][0]
-    big_str = f"{entries[0][1]}"
+    footprints = []
     
     for i in range(2, len(lines)):
-        diff = entries[i-1][0] - base
-        base = entries[i-1][0]
-        if diff > 1:
-            big_str += "." * 64 # preserve 64B footprint alignment
-        big_str += entries[i-1][1]
+        footprints.append(entries[i-1][1])
 
-    return big_str, entries[0][0], len(lines)-1
+    return footprints
 
 
-def get_repeated_footprints(trace_str, base, min_substring_len=8, min_occ=4, footprint_len=64, sort_kernel=sort_by_num_ones, trim_zeros=True):
-    tree = Tree({"A": trace_str}, builder=BUILDERS[2])
+def get_repeated_footprints(footprints, min_substring_len=8, min_occ=4, sort_kernel=sort_by_num_ones, trim_zeros=True):
+    footprints_dict = {}
+
+    for i in range(0, len(footprints)):
+        footprints_dict[str(i)] = footprints[i]
+
+    tree = Tree(footprints_dict, builder=BUILDERS[2])
     reps = maximal_repeats(tree, min_substring_len, min_occ, trim_zeros=trim_zeros)
-    reps.sort(key=sort_by_num_ones, reverse=True) # sort repeated substrings by total number of ones (freq*ones_count)
+    reps.sort(key=sort_kernel, reverse=True) # sort repeated substrings by total number of ones (freq*ones_count)
     return reps, tree
 
 
-def get_footprint_offset_stats(trace_str, base, repeated_footprints, suffix_tree):
+def get_footprint_offset_stats(footprints, repeated_footprints, suffix_tree):
     reps = repeated_footprints
     stats = []
 
@@ -77,9 +76,9 @@ def get_footprint_offset_stats(trace_str, base, repeated_footprints, suffix_tree
 
         # find distribution of footprint offsets for this substring (iterate over all occurrences)
         for j in range(0, len(occ)):
-            # index of occurrence is length of trace_string minus length of suffix 
+            # index of occurrence is length of trace_str minus length of suffix 
             # (excluding internally-appended '$' character)
-            str_offset = len(trace_str) - (len(occ[j][1]) - 1)
+            str_offset = len(footprints[0]) - (len(occ[j][1]) - 1)
 
             # get offset relative to footprint
             footprint_offset = str_offset % footprint_len
@@ -128,7 +127,7 @@ def remove_duplicates(stats, thresh=0.98):
     return new_stats
 
 
-def write_footprint_offset_stats(stats, outFileName):
+def write_footprint_offset_stats(stats, outFileName, footprint_len):
     # write CSV data headers
     out_file = open(outFileName, "w")
     out_file.write("Frequency, Substring, Length, Zeroes, Ones")
@@ -158,6 +157,7 @@ def analyze_footprint_offset_stats(stats, outFileName):
     ones_total = []
 
     outFile = open(outFileName, "w")
+    outFile.write("OnesTotal, OnesNotMode, Fraction")
     
     # for each substring found...
     for i in range(0, len(stats)):
@@ -174,56 +174,53 @@ def analyze_footprint_offset_stats(stats, outFileName):
         ones_not_mode.append(stats[i]["ones"] * (stats[i]["frequency"] - stats[i]["offsets"][max_index]))
 
         outFile.write(f"{ones_total[i]}, {ones_not_mode[i]}, \"=B{i+1}/A{i+1}\"\n")
-        #print(f'{stats[i]}: {ones_not_mode[i]} / {ones_total[i]} = {ones_not_mode[i] / ones_total[i] * 100}%')
 
     outFile.close()
 
     
 
 if __name__ == "__main__":
-    footprint_len = 64
     argc = len(sys.argv)
 
-    if argc != 6:
-        print("Arguments: traceFileStart, traceFileStride, traceFileCount, traceBaseName, outFileBaseName") 
+    if argc != 3:
+        print("Arguments: pht_snapshot_name, output_base_name") 
         exit(-1)
 
-    x, tr_start, tr_stride, tr_count, in_base, out_base = sys.argv 
-    tr_start = int(tr_start)
-    tr_stride = int(tr_stride)
-    tr_count = int(tr_count)
+    x, in_name, out_base = sys.argv 
 
-    for i in range(0, tr_count):
-        access_num = tr_start + i * tr_stride
-        trace_str, base, total_footprints = parse_pht_file(in_base + str(access_num))
-        reps, tree = get_repeated_footprints(trace_str, base, 6, 4, footprint_len)
-        print("Repeated footprints found.")
+    footprints = parse_pht_file(in_name)
+    reps, tree = get_repeated_footprints(footprints, 6, 4)
+    footprint_len = len(footprints[0])
+    print("Repeated footprints found.")
 
-        stats1 = get_footprint_offset_stats(trace_str, base, reps, tree)
-        #write_footprint_offset_stats(stats1, out_base + str(access_num))
-        print("Offset stats calculated.")
+    stats1 = get_footprint_offset_stats(footprints, reps, tree)
+    print("Offset stats calculated.")
 
-        stats2 = remove_duplicates(stats1, 0.90)
-        print(f"{len(stats1) - len(stats2)} duplicates removed.")
+    stats2 = remove_duplicates(stats1, 0.90)
+    print(f"{len(stats1) - len(stats2)} duplicates removed.")
 
-        write_footprint_offset_stats(stats2, out_base + str(access_num))
-        print(f"Wrote stats to file '{out_base + str(access_num)}'.")
+    write_footprint_offset_stats(stats2, out_base, footprint_len)
+    print(f"Wrote stats to file '{out_base}'.")
 
-        #analyze_footprint_offset_stats(stats1, "test1.csv")
-        analyze_footprint_offset_stats(stats2, out_base + '_ones-non-mode' + str(access_num))
-        print(f"Wrote ones analysis to file '{out_base + '_ones-non-mode' + str(access_num)}'.")
+    analyze_footprint_offset_stats(stats2, out_base + '_ones-non-mode')
+    print(f"Wrote ones analysis to file '{out_base + '_ones-non-mode'}'.")
 
-        # full duplicate footprints
-        reps_full, tree_full = get_repeated_footprints(trace_str, base, footprint_len, 2, footprint_len, trim_zeros=False)
+    # full duplicate footprints
+    reps_full, tree_full = get_repeated_footprints(footprints, footprint_len, 2, trim_zeros=False)
 
-        total_repeats = 0
+    total_repeats = 0
 
-        for j in range(len(reps_full)):
-            total_repeats += reps_full[j][0]
+    for i in range(len(reps_full)):
+        total_repeats += reps_full[i][0]
 
-        full_footprint_str = f"Total ones count: {trace_str.count('1')}, total footprint count: {total_footprints}, of which {total_repeats} are repeats.\n"
+    total_ones = 0
 
-        print(full_footprint_str)
-        outFile = open(out_base + "_full-footprints" + str(access_num), "w")
-        outFile.write(full_footprint_str)
-        outFile.close()
+    for i in range(len(footprints)):
+        total_ones += footprints[i].count('1')
+
+    full_footprint_str = f"Total ones count: {total_ones}, total footprint count: {len(footprints)}, of which {total_repeats} are repeats.\n"
+
+    print(full_footprint_str)
+    outFile = open(out_base + "_full-footprints", "w")
+    outFile.write(full_footprint_str)
+    outFile.close()

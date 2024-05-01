@@ -29,6 +29,7 @@ const int PC_WIDTH = 16;
 const int PHT_SIZE = 16 * 1024;
 const int FT_SIZE = 64;
 const int AT_SIZE = 128;
+const int PATTERN_SIZE = REGION_SIZE >> LOG2_BLOCK_SIZE; //PLINKO ADDITION
 
 class Table {
   public:
@@ -288,7 +289,7 @@ template <class T> class SetAssociativeCache {
     static void write_entry(Entry &entry, Table &table, int row) {
         table.set_cell(row, 0, std::to_string(entry.key));
         string footprintStr = "";
-        for(int i = FT_SIZE-1; i >= 0; i--) { //MSB on left side of string
+        for(int i = PATTERN_SIZE-1; i >= 0; i--) { //MSB on left side of string
             footprintStr += std::to_string(entry.data.pattern[i]);
         }
         table.set_cell(row, 1, footprintStr);
@@ -573,8 +574,6 @@ class PatternHistoryTable : public LRUSetAssociativeCache<PatternHistoryTableDat
         uint64_t tag = key / this->num_sets;
         auto &set = this->entries[index];
 
-        // PC + Address mask
-        uint64_t min_tag_mask = (1 << (this->pc_width + this->min_addr_width - this->index_len)) - 1;
         // PC + Offset mask
         uint64_t max_tag_mask = (1 << (this->pc_width + this->max_addr_width - this->index_len)) - 1;
 
@@ -584,8 +583,6 @@ class PatternHistoryTable : public LRUSetAssociativeCache<PatternHistoryTableDat
             // Ignore invalid sets
             if (!set[i].valid)
                 continue;
-            // Matching the tag for the short event (PC + Offset)
-            bool min_match = ((set[i].tag & min_tag_mask) == (tag & min_tag_mask));
             // Matching for the long event (PC + Address)
             bool max_match = ((set[i].tag & max_tag_mask) == (tag & max_tag_mask));
             vector<bool> &cur_pattern = set[i].data.pattern;
@@ -651,7 +648,7 @@ class Bingo {
         int filter_table_size, int accumulation_table_size)
         : pattern_len(pattern_len), filter_table(filter_table_size),
           accumulation_table(accumulation_table_size, pattern_len),
-          pht(pattern_history_table_size, pattern_len, min_addr_width, max_addr_width, pc_width) 
+          pht(pattern_history_table_size, pattern_len, min_addr_width, max_addr_width, pc_width)
     {
         //*PLINKO ADDITION
         headers.push_back("Key");
@@ -670,6 +667,7 @@ class Bingo {
         //*PLINKO ADDITION
         if(DO_PHT_SNAPSHOTS) {
             accessNumber++;
+            allAccesses += std::to_string(block_number) + string(" ") + std::to_string(pc) + string("\n");
 
             double multiplier = filesWritten + 1;
             if(GEOMETRIC_BASE > 1.001) //use geometric series only if base is larger than 1
@@ -682,9 +680,15 @@ class Bingo {
                 outFile.close();
                 //*
                 ofstream outFileTraining;
-                outFileTraining.open(SNAPSHOT_FILE_BASE_NAME + string("TRAIN") + std::to_string(accessNumber), std::ofstream::out);
+                outFileTraining.open(SNAPSHOT_FILE_BASE_NAME + string("TRAIN_") + std::to_string(accessNumber), std::ofstream::out);
                 outFileTraining << trainingTotal << " " << prefetchTotal << endl;
                 outFileTraining.close();
+                //*/
+                /*
+                ofstream outFileAccesses;
+                outFileAccesses.open(SNAPSHOT_FILE_BASE_NAME + string("ACCESSES_") + std::to_string(accessNumber), std::ofstream::out);
+                outFileAccesses << allAccesses;
+                outFileAccesses.close();
                 //*/
                 filesWritten++;
             }
@@ -834,6 +838,7 @@ class Bingo {
     vector<string> headers;
     uint64_t trainingTotal;
     uint64_t prefetchTotal;
+    string allAccesses;
     //END OF PLINKO ADDITION*/
 };
 
