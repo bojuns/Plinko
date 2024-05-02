@@ -730,10 +730,6 @@ void CACHE::llc_prefetcher_operate_(uint32_t cpu, uint64_t addr, uint64_t ip, ui
     }
 
     /* call prefetcher and send prefetches */
-<<<<<<< HEAD
-    // IP is the current PC
-=======
->>>>>>> 7d863d7 (bingo PHT trace generation, other minor fixes)
     vector<uint64_t> to_prefetch = prefetchers[cpu].access(block_number, ip);
     for (auto &pf_block_number : to_prefetch) {
         uint64_t pf_address = pf_block_number << LOG2_BLOCK_SIZE;
@@ -793,11 +789,7 @@ void CACHE::llc_prefetcher_final_stats_(uint32_t cpu) {
 
     cout << "* CPU " << cpu << " Total PC+Address Covered Misses: " << prefetchers[cpu].get_cover_cnt(PC_ADDRESS) << endl;
     cout << "* CPU " << cpu << " Total PC+Offset Covered Misses: "  << prefetchers[cpu].get_cover_cnt(PC_OFFSET)  << endl;
-<<<<<<< HEAD
-}
-=======
     
     cout << "* CPU " << cpu << " Total PC+Address Overpredictions: " << prefetchers[cpu].get_overpredict_cnt(PC_ADDRESS) << endl;
     cout << "* CPU " << cpu << " Total PC+Offset Overpredictions: "  << prefetchers[cpu].get_overpredict_cnt(PC_OFFSET)  << endl;
 }
->>>>>>> 7d863d7 (bingo PHT trace generation, other minor fixes)
